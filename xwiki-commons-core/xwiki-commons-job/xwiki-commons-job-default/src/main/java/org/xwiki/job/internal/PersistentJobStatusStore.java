@@ -53,6 +53,27 @@ public interface PersistentJobStatusStore
     JobStatus loadJobStatus(List<String> id) throws IOException;
 
     /**
+     * Load the most recent status of the job stored by another member of the cluster, when the storage is shared
+     * between the cluster members. It is called by {@link DefaultJobStatusStore} only when {@link #loadJobStatus(List)}
+     * found no status for the current member.
+     * <p>
+     * The other member can store a new version of the status at any time without notifying the current member, so the
+     * caller only keeps the result (or its absence) in a short-lived cache, never with the statuses of the current
+     * member. The returned status is the last one the other member stored, usually when the job ended: while that
+     * member runs the same job again, it is the status of the previous run. It must be considered read-only.
+     *
+     * @param id the id of the job
+     * @return the most recent status stored by another cluster member, or {@code null} if there is none or the
+     * storage is not shared between the cluster members
+     * @throws IOException when failing to load the job status
+     * @since 18.9.0RC1
+     */
+    default JobStatus loadRemoteJobStatus(List<String> id) throws IOException
+    {
+        return null;
+    }
+
+    /**
      * Remove the job status from the persistent storage.
      *
      * @param id the id of the job

@@ -31,6 +31,8 @@ import org.mockito.ArgumentCaptor;
 import org.xwiki.cache.Cache;
 import org.xwiki.cache.CacheException;
 import org.xwiki.cache.CacheManager;
+import org.xwiki.cache.config.CacheConfiguration;
+import org.xwiki.cache.config.LRUCacheConfiguration;
 import org.xwiki.component.util.ReflectionUtils;
 import org.xwiki.job.DefaultJobStatus;
 import org.xwiki.job.DefaultRequest;
@@ -46,15 +48,17 @@ import org.xwiki.test.junit5.mockito.MockComponent;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -77,6 +81,10 @@ class DefaultJobStatusStoreTest
 
     private static final String TYPE = "type";
 
+    private static final String REMOTE_CACHE_ID = "job.status.remote";
+
+    private static final int REMOTE_LIFESPAN = 10;
+
     @RegisterExtension
     private final LogCaptureExtension logCapture = new LogCaptureExtension(LogLevel.WARN);
 
@@ -94,12 +102,24 @@ class DefaultJobStatusStoreTest
 
     private Cache<JobStatus> cache;
 
+    private ExpiringMapCache<JobStatus> remoteCache;
+
     @BeforeComponent
     void before() throws Exception
     {
         when(this.configuration.getJobStatusCacheSize()).thenReturn(100);
-        this.cache = mock();
-        doReturn(this.cache).when(this.cacheManager).createNewCache(any());
+        when(this.configuration.getJobStatusRemoteCacheLifespan()).thenReturn(REMOTE_LIFESPAN);
+        this.cache = spy(new ExpiringMapCache<>(0));
+        // The remote cache expires its entries after the configured lifespan, on a clock moved by the tests.
+        doAnswer(invocation -> {
+            CacheConfiguration configuration = invocation.getArgument(0);
+            if (configuration != null && REMOTE_CACHE_ID.equals(configuration.getConfigurationId())) {
+                this.remoteCache = new ExpiringMapCache<>(
+                    ((LRUCacheConfiguration) configuration).getLRUEvictionConfiguration().getLifespan());
+                return this.remoteCache;
+            }
+            return this.cache;
+        }).when(this.cacheManager).createNewCache(any());
     }
 
     @Test
@@ -160,7 +180,172 @@ class DefaultJobStatusStoreTest
         assertNull(this.store.getJobStatus(ID));
 
         verify(this.cache).remove(ID_STRING);
+        verify(this.persistentJobStatusStore, never()).loadRemoteJobStatus(any());
         assertEquals("Failed to load job status for id [[id1, id2]]: [IOException: error]", logCapture.getMessage(0));
+    }
+
+    @Test
+    void initializeCreatesShortLivedRemoteCache() throws Exception
+    {
+        ArgumentCaptor<CacheConfiguration> captor = ArgumentCaptor.captor();
+        verify(this.cacheManager, times(2)).createNewCache(captor.capture());
+
+        LRUCacheConfiguration remoteConfiguration = (LRUCacheConfiguration) captor.getAllValues().get(1);
+        assertEquals(REMOTE_CACHE_ID, remoteConfiguration.getConfigurationId());
+        assertEquals(100, remoteConfiguration.getLRUEvictionConfiguration().getMaxEntries());
+        assertEquals(REMOTE_LIFESPAN, remoteConfiguration.getLRUEvictionConfiguration().getLifespan());
+    }
+
+    @Test
+    void getJobStatusWhenOnlyStoredByAnotherMember() throws Exception
+    {
+        JobStatus remoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(remoteStatus);
+
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        // The main cache only holds the local absence, the status of the other member is in the remote cache.
+        assertNotNull(this.cache.get(ID_STRING));
+        assertNotSame(remoteStatus, this.cache.get(ID_STRING));
+        assertSame(remoteStatus, this.remoteCache.get(ID_STRING));
+        verify(this.persistentJobStatusStore).loadJobStatus(ID);
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusWhenNoMemberHasAStatusIsNotQueriedAgainDuringTheLifespan() throws Exception
+    {
+        JobStatus remoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(null, remoteStatus);
+
+        for (int i = 0; i < 5; ++i) {
+            assertNull(this.store.getJobStatus(ID));
+        }
+        this.remoteCache.advance(REMOTE_LIFESPAN - 1);
+        assertNull(this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
+
+        // Once the lifespan is over, the status stored meanwhile by another member is found.
+        this.remoteCache.advance(1);
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore, times(2)).loadRemoteJobStatus(ID);
+        verify(this.persistentJobStatusStore).loadJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusSeesANewerRemoteStatusAfterTheLifespan() throws Exception
+    {
+        JobStatus firstRemoteStatus = mock();
+        JobStatus secondRemoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(firstRemoteStatus,
+            secondRemoteStatus);
+
+        assertSame(firstRemoteStatus, this.store.getJobStatus(ID));
+        this.remoteCache.advance(REMOTE_LIFESPAN - 1);
+        assertSame(firstRemoteStatus, this.store.getJobStatus(ID));
+        this.remoteCache.advance(1);
+        assertSame(secondRemoteStatus, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore, times(2)).loadRemoteJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusWhenRemoteCacheIsDisabled() throws Exception
+    {
+        when(this.configuration.getJobStatusRemoteCacheLifespan()).thenReturn(0);
+        this.store.initialize();
+
+        JobStatus remoteStatus = mock();
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(null, remoteStatus);
+
+        assertNull(this.store.getJobStatus(ID));
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore, times(2)).loadRemoteJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusWhenRemoteLoadFails() throws Exception
+    {
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenThrow(new IOException(ERROR));
+
+        assertNull(this.store.getJobStatus(ID));
+        // The failure is cached as an absence: no second lookup and no second warning during the lifespan.
+        assertNull(this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
+        assertEquals(1, this.logCapture.size());
+        assertEquals("Failed to load the job status for id [[id1, id2]] stored by another cluster member: "
+            + "[IOException: error]", this.logCapture.getMessage(0));
+    }
+
+    @Test
+    void getJobStatusWhenStoredLocallyAfterRemoteRead() throws Exception
+    {
+        DefaultRequest request = new DefaultRequest();
+        request.setId(ID);
+        JobStatus localStatus = new DefaultJobStatus<>(TYPE, request, null, null, null);
+        JobStatus remoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(remoteStatus);
+
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        // The job is then executed by the current member: its own status replaces the cached absence and wins over
+        // the cached status of the other member.
+        this.store.store(localStatus);
+
+        assertSame(localStatus, this.store.getJobStatus(ID));
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusWhenLocalAbsenceIsEvicted() throws Exception
+    {
+        JobStatus remoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(remoteStatus);
+
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        // The local absence leaves the main cache (LRU eviction): the local storage is read again, then the remote
+        // cache answers.
+        this.cache.remove(ID_STRING);
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore, times(2)).loadJobStatus(ID);
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusAfterRemoveReturnsTheStatusOfAnotherMember() throws Exception
+    {
+        JobStatus localStatus = mock();
+        JobStatus remoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(localStatus, (JobStatus) null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(remoteStatus);
+
+        assertSame(localStatus, this.store.getJobStatus(ID));
+        verify(this.persistentJobStatusStore, never()).loadRemoteJobStatus(any());
+
+        // Only the status of the current member is removed.
+        this.store.remove(ID);
+
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
     }
 
     @Test
@@ -201,6 +386,7 @@ class DefaultJobStatusStoreTest
         assertSame(status, this.store.getJobStatus(ID));
 
         verify(this.persistentJobStatusStore, never()).loadJobStatus(any());
+        verify(this.persistentJobStatusStore, never()).loadRemoteJobStatus(any());
     }
 
     @Test

@@ -104,6 +104,12 @@ public class DefaultJobManagerConfiguration implements JobManagerConfiguration, 
     }
 
     @Override
+    public int getJobStatusRemoteCacheLifespan()
+    {
+        return this.configuration.get().getProperty("job.statusRemoteCacheLifespan", 10);
+    }
+
+    @Override
     public int getGroupedJobInitializerCacheSize()
     {
         return this.configuration.get().getProperty("job.groupedJobInitializerCacheSize", 100);

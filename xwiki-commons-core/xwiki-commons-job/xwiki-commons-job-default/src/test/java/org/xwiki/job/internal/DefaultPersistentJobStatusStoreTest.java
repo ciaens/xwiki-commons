@@ -388,6 +388,13 @@ class DefaultPersistentJobStatusStoreTest
     }
 
     @Test
+    void loadRemoteJobStatusWhenStorageIsNotShared() throws IOException
+    {
+        // The status exists in the local folder, but the filesystem storage is never shared with other members.
+        assertNull(this.store.loadRemoteJobStatus(Arrays.asList("id1", "id2")));
+    }
+
+    @Test
     void getJobStatusThatDoesNotExist() throws IOException
     {
         JobStatus jobStatus = this.store.loadJobStatus(Arrays.asList("nostatus"));

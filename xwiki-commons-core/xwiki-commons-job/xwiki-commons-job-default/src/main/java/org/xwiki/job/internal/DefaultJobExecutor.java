@@ -19,6 +19,7 @@
  */
 package org.xwiki.job.internal;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -42,8 +43,11 @@ import javax.inject.Named;
 import javax.inject.Provider;
 import javax.inject.Singleton;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.xwiki.classloader.ClassLoaderManager;
 import org.xwiki.component.annotation.Component;
+import org.xwiki.component.annotation.DisposePriority;
 import org.xwiki.component.manager.ComponentLifecycleException;
 import org.xwiki.component.manager.ComponentLookupException;
 import org.xwiki.component.manager.ComponentManager;
@@ -59,25 +63,50 @@ import org.xwiki.job.JobExecutor;
 import org.xwiki.job.JobGroupPath;
 import org.xwiki.job.JobManagerConfiguration;
 import org.xwiki.job.Request;
+import org.xwiki.job.event.status.CancelableJobStatus;
+import org.xwiki.job.event.status.JobStatus;
 
 /**
  * Default implementation of {@link JobExecutor}.
+ * <p>
+ * The executor is disposed before the other components (see {@link #DISPOSE_PRIORITY}): the jobs it waits for
+ * during the shutdown need the stores, the caches, the event listeners and the logging to be still alive, otherwise a
+ * job keeps running in a half-disposed system and finishes with silently missing side effects.
  *
  * @version $Id$
  * @since 6.1M2
  */
 @Component
 @Singleton
+@DisposePriority(DefaultJobExecutor.DISPOSE_PRIORITY)
 public class DefaultJobExecutor implements JobExecutor, Initializable, Disposable
 {
+    /**
+     * The dispose priority of the executor, lower than any other component's so that the running jobs are waited for
+     * while the rest of the system is intact.
+     *
+     * @since 18.9.0RC1
+     */
+    public static final int DISPOSE_PRIORITY = 100;
+
+    /**
+     * Logger dedicated to shutdown information (same logger name as in other components).
+     */
+    private static final Logger SHUTDOWN_LOGGER = LoggerFactory.getLogger("org.xwiki.shutdown");
+
+    /**
+     * The time in milliseconds given to interrupted jobs to finish (and store their status) after they have been
+     * interrupted because the shutdown timeout expired.
+     */
+    private static final long INTERRUPT_GRACE_TIME = 5000L;
+
+    private static final String DISPOSED_MESSAGE = "The job executor is disposed";
+
     private class JobGroupExecutor extends JobThreadExecutor implements ThreadFactory
     {
         private final ThreadFactory threadFactory = Executors.defaultThreadFactory();
 
         private final JobGroupPath path;
-
-        private final Set<Job> currentJobs =
-            Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<>()));
 
         private final String groupThreadName;
 
@@ -113,9 +142,11 @@ public class DefaultJobExecutor implements JobExecutor, Initializable, Disposabl
         @Override
         protected void beforeExecute(Thread t, Runnable r)
         {
-            DefaultJobExecutor.this.lockTree.lock(this.path);
+            // Register the job before waiting for the group lock (which cannot be interrupted) so that it's taken into
+            // account by #dispose()
+            registerJob(r);
 
-            this.currentJobs.add((Job) r);
+            DefaultJobExecutor.this.lockTree.lock(this.path);
 
             super.beforeExecute(t, r);
         }
@@ -126,8 +157,6 @@ public class DefaultJobExecutor implements JobExecutor, Initializable, Disposabl
             DefaultJobExecutor.this.lockTree.unlock(this.path);
 
             Job job = (Job) r;
-
-            this.currentJobs.remove(job);
 
             super.afterExecute(r, t);
 
@@ -167,10 +196,35 @@ public class DefaultJobExecutor implements JobExecutor, Initializable, Disposabl
 
     private class JobThreadExecutor extends ThreadPoolExecutor
     {
+        /**
+         * The jobs currently executed by this executor, including those waiting for their group lock.
+         */
+        private final Set<Job> currentJobs =
+            Collections.synchronizedSet(Collections.newSetFromMap(new IdentityHashMap<>()));
+
         JobThreadExecutor(int corePoolSize, int maximumPoolSize, long keepAliveTime, TimeUnit unit,
             BlockingQueue<Runnable> workQueue)
         {
             super(corePoolSize, maximumPoolSize, keepAliveTime, unit, workQueue);
+        }
+
+        /**
+         * @param r the job given to a thread of this executor
+         */
+        void registerJob(Runnable r)
+        {
+            this.currentJobs.add((Job) r);
+        }
+
+        /**
+         * @return a copy of the set of jobs currently executed by this executor
+         */
+        List<Job> getCurrentJobs()
+        {
+            // As this is a synchronized set, we need to explicitly synchronize on it for the iteration.
+            synchronized (this.currentJobs) {
+                return List.copyOf(this.currentJobs);
+            }
         }
 
         protected String getThreadName(Runnable r)
@@ -186,6 +240,8 @@ public class DefaultJobExecutor implements JobExecutor, Initializable, Disposabl
         @Override
         protected void beforeExecute(Thread t, Runnable r)
         {
+            registerJob(r);
+
             // Set a custom thread name corresponding to the job to make debugging easier
             Thread.currentThread().setName(getThreadName(r));
 
@@ -197,6 +253,8 @@ public class DefaultJobExecutor implements JobExecutor, Initializable, Disposabl
         protected void afterExecute(Runnable r, Throwable t)
         {
             Job job = (Job) r;
+
+            this.currentJobs.remove(job);
 
             List<String> jobId = job.getRequest().getId();
             if (jobId != null) {
@@ -267,13 +325,147 @@ public class DefaultJobExecutor implements JobExecutor, Initializable, Disposabl
     @Override
     public void dispose() throws ComponentLifecycleException
     {
-        synchronized (this) {
+        List<JobThreadExecutor> executors;
+        // Same monitor as #executeGroupedJob() so that no group executor is created after the snapshot
+        synchronized (this.groupExecutors) {
             this.disposed = true;
 
-            this.jobExecutor.shutdownNow();
-            for (JobGroupExecutor executor : this.groupExecutors.values()) {
-                executor.shutdownNow();
+            executors = new ArrayList<>(this.groupExecutors.size() + 1);
+            executors.add(this.jobExecutor);
+            executors.addAll(this.groupExecutors.values());
+        }
+
+        // Stop accepting new jobs and take the jobs which have not started yet out of the queues: it's too late for
+        // them
+        List<Runnable> queuedJobs = new ArrayList<>();
+        for (JobThreadExecutor executor : executors) {
+            executor.shutdown();
+            executor.getQueue().drainTo(queuedJobs);
+        }
+        dropQueuedJobs(queuedJobs);
+
+        // Give the running jobs a chance to finish properly
+        long timeout = this.jobManagerConfiguration.getShutdownTimeout();
+        List<Job> runningJobs = getRunningJobs(executors);
+        if (timeout > 0 && !runningJobs.isEmpty()) {
+            SHUTDOWN_LOGGER.info("Waiting up to [{}]ms for the following [{}] job(s) to finish: {}", timeout,
+                runningJobs.size(), toJobIds(runningJobs));
+
+            awaitTermination(executors, System.currentTimeMillis() + timeout);
+
+            runningJobs = getRunningJobs(executors);
+        }
+
+        // Interrupt the jobs which are still running
+        if (!runningJobs.isEmpty()) {
+            SHUTDOWN_LOGGER.warn("Interrupting the following [{}] job(s) still running after [{}]ms: {}",
+                runningJobs.size(), timeout, toJobIds(runningJobs));
+
+            interruptJobs(executors, runningJobs);
+
+            // Give the interrupted jobs a bit of time to store their status (unless waiting is disabled)
+            if (timeout > 0) {
+                awaitTermination(executors, System.currentTimeMillis() + INTERRUPT_GRACE_TIME);
+
+                if (!executors.stream().allMatch(JobThreadExecutor::isTerminated)) {
+                    SHUTDOWN_LOGGER.warn("Some jobs are still running [{}]ms after being interrupted: {}",
+                        INTERRUPT_GRACE_TIME, toJobIds(getRunningJobs(executors)));
+                }
             }
+        }
+    }
+
+    /**
+     * Cancel the cancelable jobs and interrupt all the threads of the passed executors.
+     *
+     * @param executors the executors to interrupt
+     * @param runningJobs the jobs currently executed by the executors
+     */
+    private void interruptJobs(List<JobThreadExecutor> executors, List<Job> runningJobs)
+    {
+        // Let cancelable jobs know they are expected to stop
+        for (Job job : runningJobs) {
+            JobStatus status = job.getStatus();
+            if (status instanceof CancelableJobStatus cancelableStatus && cancelableStatus.isCancelable()) {
+                cancelableStatus.cancel();
+            }
+        }
+
+        for (JobThreadExecutor executor : executors) {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * Release the callers of jobs which are never going to be executed.
+     *
+     * @param queuedJobs the jobs which were waiting for a thread
+     */
+    private void dropQueuedJobs(List<Runnable> queuedJobs)
+    {
+        if (!queuedJobs.isEmpty()) {
+            List<Job> droppedJobs = queuedJobs.stream().map(Job.class::cast).toList();
+
+            SHUTDOWN_LOGGER.warn("The following [{}] job(s) were waiting to be executed and are dropped: {}",
+                droppedJobs.size(), toJobIds(droppedJobs));
+
+            for (Job job : droppedJobs) {
+                if (job instanceof org.xwiki.job.AbstractJob<?, ?> abstractJob) {
+                    // Mark the job finished (with an error) and store its status so that the callers waiting for it
+                    // are released and a trace of it is kept. The error is caused by an interruption, like for the
+                    // running jobs interrupted by the shutdown, so that both are reported the same way.
+                    abstractJob.abort(new JobException("The job has not been executed because XWiki is stopping",
+                        new InterruptedException("XWiki is stopping")));
+                }
+            }
+        }
+    }
+
+    private List<Job> getRunningJobs(List<JobThreadExecutor> executors)
+    {
+        List<Job> runningJobs = new ArrayList<>();
+
+        for (JobThreadExecutor executor : executors) {
+            runningJobs.addAll(executor.getCurrentJobs());
+        }
+
+        return runningJobs;
+    }
+
+    /**
+     * @param jobs the jobs
+     * @return the identifiers of the passed jobs, or their type for the jobs without identifier
+     */
+    private List<Object> toJobIds(List<Job> jobs)
+    {
+        return jobs.stream().map(job -> {
+            List<String> id = job.getRequest() != null ? job.getRequest().getId() : null;
+
+            return id != null ? id : "<" + job.getType() + '>';
+        }).toList();
+    }
+
+    /**
+     * Wait for the passed executors to terminate, until the passed deadline. The deadline is shared by all the
+     * executors: the executors are waited for one after the other, but the total time spent is bounded by the deadline.
+     *
+     * @param executors the executors to wait for
+     * @param deadline the time in milliseconds (see {@link System#currentTimeMillis()}) at which to stop waiting
+     */
+    private void awaitTermination(List<JobThreadExecutor> executors, long deadline)
+    {
+        try {
+            for (JobThreadExecutor executor : executors) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0 || !executor.awaitTermination(remaining, TimeUnit.MILLISECONDS)) {
+                    // Too late, don't wait for the other executors (the running jobs are reported by the caller)
+                    return;
+                }
+            }
+        } catch (InterruptedException e) {
+            SHUTDOWN_LOGGER.warn("Interrupted while waiting for the running jobs to finish");
+
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -292,10 +484,7 @@ public class DefaultJobExecutor implements JobExecutor, Initializable, Disposabl
 
         if (executor != null) {
             // Return an unmodifiable copy of the set of currently running jobs.
-            // As this is a synchronized set, we need to explicitly synchronize on it for the iteration.
-            synchronized (executor.currentJobs) {
-                return List.copyOf(executor.currentJobs);
-            }
+            return executor.getCurrentJobs();
         }
 
         return Collections.emptyList();
@@ -359,7 +548,7 @@ public class DefaultJobExecutor implements JobExecutor, Initializable, Disposabl
                 executeSingleJob(job);
             }
         } else {
-            throw new RejectedExecutionException("The job executor is disposed");
+            throw new RejectedExecutionException(DISPOSED_MESSAGE);
         }
     }
 
@@ -388,6 +577,11 @@ public class DefaultJobExecutor implements JobExecutor, Initializable, Disposabl
         // While synchronization isn't necessary for the insertion in the group executors, this ensures that jobs in
         // the "groupedJobs" queues have the same order as in the executor's queue.
         synchronized (this.groupExecutors) {
+            // Check again under the monitor so that no group executor is created after #dispose() took its snapshot
+            if (this.disposed) {
+                throw new RejectedExecutionException(DISPOSED_MESSAGE);
+            }
+
             JobGroupPath path = job.getGroupPath();
 
             // If path is null execute as non grouped job

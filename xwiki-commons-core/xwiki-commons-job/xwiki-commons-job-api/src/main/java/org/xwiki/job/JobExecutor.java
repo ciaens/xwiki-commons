@@ -47,7 +47,9 @@ public interface JobExecutor
     Job getCurrentJob(JobGroupPath groupPath);
 
     /**
-     * The set of jobs running within the specified job group.
+     * The set of jobs running within the specified job group. Since 18.9.0RC1, this also includes the jobs which have
+     * been given a thread by the executor but are still waiting for the lock of their group (their status is not yet
+     * {@link org.xwiki.job.event.status.JobStatus.State#RUNNING}).
      *
      * @param groupPath the path of the job group for which the current jobs should be retrieved
      * @return a collection containing the currently running jobs in the provided group

@@ -20,27 +20,48 @@
 package org.xwiki.job.internal;
 
 import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.xwiki.component.annotation.DisposePriority;
 import org.xwiki.component.internal.ContextComponentManagerProvider;
+import org.xwiki.component.manager.ComponentLifecycleException;
+import org.xwiki.job.DefaultJobStatus;
 import org.xwiki.job.DefaultRequest;
 import org.xwiki.job.GroupedJobInitializer;
 import org.xwiki.job.GroupedJobInitializerManager;
 import org.xwiki.job.Job;
+import org.xwiki.job.JobException;
 import org.xwiki.job.JobGroupPath;
 import org.xwiki.job.JobManagerConfiguration;
+import org.xwiki.job.JobStatusStore;
 import org.xwiki.job.event.status.JobStatus.State;
 import org.xwiki.job.test.TestBasicGroupedJob;
+import org.xwiki.job.test.TestBlockingJob;
+import org.xwiki.test.LogLevel;
 import org.xwiki.test.annotation.ComponentList;
+import org.xwiki.test.junit5.LogCaptureExtension;
 import org.xwiki.test.junit5.mockito.ComponentTest;
 import org.xwiki.test.junit5.mockito.InjectMockComponents;
 import org.xwiki.test.junit5.mockito.MockComponent;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -61,8 +82,17 @@ class DefaultJobExecutorTest
     @InjectMockComponents
     private DefaultJobExecutor executor;
 
+    @InjectMockComponents
+    private TestBlockingJob blockingJob;
+
     @MockComponent
     private JobManagerConfiguration jobManagerConfiguration;
+
+    @MockComponent
+    private JobStatusStore jobStatusStore;
+
+    @RegisterExtension
+    private LogCaptureExtension logCapture = new LogCaptureExtension(LogLevel.WARN);
 
     @BeforeEach
     void setup()
@@ -99,10 +129,23 @@ class DefaultJobExecutorTest
      */
     private void waitJobState(State expected, Job job)
     {
+        waitCondition(() -> expected == job.getStatus().getState(),
+            () -> String.format("Job never reached expected state [%s]. Still [%s] after %s milliseconds", expected,
+                job.getStatus().getState(), WAIT_VALUE));
+    }
+
+    /**
+     * Waits until the passed condition is true, failing when it's not within {@link #WAIT_VALUE} milliseconds.
+     *
+     * @param condition the condition to wait for
+     * @param message the failure message
+     */
+    private void waitCondition(BooleanSupplier condition, Supplier<String> message)
+    {
         int wait = 0;
 
         do {
-            if (expected == job.getStatus().getState()) {
+            if (condition.getAsBoolean()) {
                 return;
             }
 
@@ -112,14 +155,13 @@ class DefaultJobExecutorTest
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
 
-                throw new AssertionError("Job state monitor has been interrupted", e);
+                throw new AssertionError("Condition monitor has been interrupted", e);
             }
 
             wait += 1;
         } while (wait < WAIT_VALUE);
 
-        throw new AssertionError(String.format("Job never reached expected state [%s]. Still [%s] after %s "
-            + "milliseconds", expected, job.getStatus().getState(), WAIT_VALUE));
+        throw new AssertionError(message.get());
     }
 
     @Test
@@ -401,6 +443,243 @@ class DefaultJobExecutorTest
         jobAB3.unlock();
         waitJobFinished(jobAB3);
         assertSame(State.FINISHED, jobAB3.getStatus().getState());
+    }
+
+    /**
+     * Give the blocking job to the executor.
+     *
+     * @param path the group of the job, null for a single job
+     * @return the status of the job
+     */
+    private DefaultJobStatus<DefaultRequest> executeBlockingJob(JobGroupPath path)
+    {
+        DefaultRequest request = new DefaultRequest();
+        request.setId("blocking");
+        this.blockingJob.initialize(request);
+        this.blockingJob.setGroupPath(path);
+
+        this.executor.execute(this.blockingJob);
+
+        return this.blockingJob.getStatus();
+    }
+
+    /**
+     * Start the blocking job (as a single job) and wait for it to be running.
+     *
+     * @return the status of the started job
+     */
+    private DefaultJobStatus<DefaultRequest> startBlockingJob()
+    {
+        DefaultJobStatus<DefaultRequest> status = executeBlockingJob(null);
+
+        waitJobState(State.RUNNING, this.blockingJob);
+
+        return status;
+    }
+
+    /**
+     * Dispose the executor in another thread (for the tests which need to act on the jobs while dispose() waits).
+     *
+     * @return the started thread
+     */
+    private Thread disposeLater()
+    {
+        Thread disposer = new Thread(() -> {
+            try {
+                this.executor.dispose();
+            } catch (ComponentLifecycleException e) {
+                throw new AssertionError(e);
+            }
+        });
+        disposer.start();
+
+        return disposer;
+    }
+
+    /**
+     * Execute the passed action in a new thread after {@link #WAIT_VALUE} milliseconds: there is no observable state
+     * change to wait for instead, the point is to release a running job while dispose() is waiting for it.
+     *
+     * @param action the action to execute
+     * @return the started thread
+     */
+    @SuppressWarnings("java:S2925")
+    private Thread executeLater(Runnable action)
+    {
+        Thread thread = new Thread(() -> {
+            try {
+                Thread.sleep(WAIT_VALUE);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            action.run();
+        });
+        thread.start();
+
+        return thread;
+    }
+
+    @Test
+    void disposedBeforeTheOtherComponents()
+    {
+        // The wait for the running jobs is only useful while the components they rely on are still alive
+        DisposePriority priority = DefaultJobExecutor.class.getAnnotation(DisposePriority.class);
+
+        assertNotNull(priority);
+        assertTrue(priority.value() < DisposePriority.DEFAULT_PRIORITY);
+        assertTrue(priority.value() < DefaultJobStatusStore.class.getAnnotation(DisposePriority.class).value());
+    }
+
+    @Test
+    void disposeWaitsForRunningJob() throws Exception
+    {
+        when(this.jobManagerConfiguration.getShutdownTimeout()).thenReturn(10000L);
+
+        DefaultJobStatus<DefaultRequest> status = startBlockingJob();
+
+        // Release the job a bit after dispose() started waiting for it
+        Thread unblocker = executeLater(this.blockingJob::unblock);
+
+        this.executor.dispose();
+
+        unblocker.join();
+
+        // dispose() waited for the job to finish normally
+        assertSame(State.FINISHED, status.getState());
+        assertNull(status.getError());
+        assertFalse(status.isCanceled());
+        verify(this.jobStatusStore).storeAsync(status);
+
+        // No new job is accepted
+        assertThrows(RejectedExecutionException.class, () -> this.executor.execute(this.blockingJob));
+    }
+
+    @Test
+    void disposeInterruptsAfterTimeout() throws Exception
+    {
+        when(this.jobManagerConfiguration.getShutdownTimeout()).thenReturn((long) WAIT_VALUE);
+
+        DefaultJobStatus<DefaultRequest> status = startBlockingJob();
+        status.setCancelable(true);
+
+        long start = System.currentTimeMillis();
+        this.executor.dispose();
+        long duration = System.currentTimeMillis() - start;
+
+        // The job was interrupted after the timeout and finished right away (well before the grace time expired)
+        assertTrue(duration < 5000L, "dispose() took " + duration + "ms");
+        assertSame(State.FINISHED, status.getState());
+        assertInstanceOf(InterruptedException.class, status.getError());
+        // The job is cancelable so it has been canceled
+        assertTrue(status.isCanceled());
+        verify(this.jobStatusStore).storeAsync(status);
+
+        assertEquals("Interrupting the following [1] job(s) still running after [" + WAIT_VALUE + "]ms: [[blocking]]",
+            this.logCapture.getMessage(0));
+        assertEquals("Exception thrown during job execution", this.logCapture.getMessage(1));
+        assertEquals(2, this.logCapture.size());
+    }
+
+    @Test
+    void disposeWithoutTimeoutInterruptsImmediately() throws Exception
+    {
+        when(this.jobManagerConfiguration.getShutdownTimeout()).thenReturn(0L);
+
+        DefaultJobStatus<DefaultRequest> status = startBlockingJob();
+
+        long start = System.currentTimeMillis();
+        this.executor.dispose();
+        long duration = System.currentTimeMillis() - start;
+
+        // dispose() did not wait for the job, neither before nor after interrupting it (which would take 5s)
+        assertTrue(duration < 1000L, "dispose() took " + duration + "ms");
+
+        waitJobFinished(this.blockingJob);
+
+        assertInstanceOf(InterruptedException.class, status.getError());
+        // The job is not cancelable so the error is the only marker
+        assertFalse(status.isCanceled());
+        verify(this.jobStatusStore).storeAsync(status);
+
+        assertEquals("Interrupting the following [1] job(s) still running after [0]ms: [[blocking]]",
+            this.logCapture.getMessage(0));
+        assertEquals("Exception thrown during job execution", this.logCapture.getMessage(1));
+    }
+
+    @Test
+    void disposeDropsQueuedJobs() throws Exception
+    {
+        when(this.jobManagerConfiguration.getShutdownTimeout()).thenReturn(10000L);
+        mockAllPools(1);
+
+        TestBasicGroupedJob jobA1 = groupedJob("A");
+        jobA1.lock();
+
+        this.executor.execute(jobA1);
+        waitJobWaiting(jobA1);
+
+        // The blocking job is queued behind the first job of the group
+        JobGroupPath path = new JobGroupPath(List.of("A"));
+        DefaultJobStatus<DefaultRequest> status = executeBlockingJob(path);
+        assertEquals(List.of(jobA1), this.executor.getCurrentJobs(path));
+
+        // Dispose in another thread since the lock of the first job can only be released by the thread which locked it
+        Thread disposer = disposeLater();
+
+        // Wait for dispose() to have dropped the queued job before letting the running job finish
+        waitCondition(() -> this.logCapture.size() > 0, () -> "The queued job has not been dropped");
+        assertEquals("The following [1] job(s) were waiting to be executed and are dropped: [[blocking]]",
+            this.logCapture.getMessage(0));
+        jobA1.unlock();
+
+        disposer.join();
+
+        assertSame(State.FINISHED, jobA1.getStatus().getState());
+        assertEquals(List.of(), this.executor.getCurrentJobs(path));
+
+        // The queued job has never been started but its callers are released and it has a stored status
+        assertSame(State.FINISHED, status.getState());
+        assertInstanceOf(JobException.class, status.getError());
+        assertEquals("The job has not been executed because XWiki is stopping", status.getError().getMessage());
+        // Caused by an interruption, like the running jobs interrupted by the shutdown
+        assertInstanceOf(InterruptedException.class, status.getError().getCause());
+        assertNotNull(status.getStartDate());
+        assertNotNull(status.getEndDate());
+        assertTrue(this.blockingJob.join(1, TimeUnit.SECONDS));
+        verify(this.jobStatusStore).store(status);
+        assertEquals(1, this.logCapture.size());
+    }
+
+    @Test
+    void disposeSeesJobWaitingForGroupLock() throws Exception
+    {
+        when(this.jobManagerConfiguration.getShutdownTimeout()).thenReturn(10000L);
+        mockAllPools(1);
+
+        TestBasicGroupedJob jobA = groupedJob("A");
+        jobA.lock();
+
+        this.executor.execute(jobA);
+        waitJobWaiting(jobA);
+
+        // The blocking job has its own group, so its own thread, but it has to wait for the lock held by the parent
+        // group
+        JobGroupPath path = new JobGroupPath(List.of("A", "B"));
+        DefaultJobStatus<DefaultRequest> status = executeBlockingJob(path);
+
+        waitCondition(() -> this.executor.getCurrentJobs(path).contains(this.blockingJob),
+            () -> "The job waiting for its group lock is not listed as a current job");
+        assertSame(State.NONE, status.getState());
+
+        // Release everything and dispose
+        this.blockingJob.unblock();
+        jobA.unlock();
+        this.executor.dispose();
+
+        assertSame(State.FINISHED, jobA.getStatus().getState());
+        assertSame(State.FINISHED, status.getState());
+        assertNull(status.getError());
+        assertFalse(status.isCanceled());
     }
 
     private void mockAllPools(int poolSize)

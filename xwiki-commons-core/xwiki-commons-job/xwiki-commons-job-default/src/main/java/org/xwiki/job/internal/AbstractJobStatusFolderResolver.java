@@ -23,6 +23,7 @@ import java.io.File;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 import javax.inject.Inject;
@@ -53,13 +54,20 @@ public abstract class AbstractJobStatusFolderResolver implements JobStatusFolder
     @Override
     public File getFolder(List<String> id) throws JobException
     {
-        File folder = getBaseFolder();
+        File folder = this.configuration.getStorage();
+
+        for (String pathSegment : getBaseFolderSegments()) {
+            folder = new File(folder, pathSegment);
+        }
 
         if (id != null) {
             // Create a different folder for each element
             for (String fullIdElement : id) {
                 // Get the location of the current id element
-                File childFolder = addIDElement(fullIdElement, folder);
+                File childFolder = folder;
+                for (String pathSegment : encodeAndSplit(fullIdElement)) {
+                    childFolder = new File(childFolder, pathSegment);
+                }
 
                 // Make sure the child is indeed a child.
                 if (!toComparablePath(childFolder).startsWith(toComparablePath(folder))) {
@@ -80,6 +88,20 @@ public abstract class AbstractJobStatusFolderResolver implements JobStatusFolder
         return folder.toPath().toAbsolutePath().normalize();
     }
 
+    @Override
+    public List<String> getFolderSegments(List<String> jobID)
+    {
+        List<String> result = new ArrayList<>(getBaseFolderSegments());
+
+        if (jobID != null) {
+            for (String idElement : jobID) {
+                result.addAll(encodeAndSplit(idElement));
+            }
+        }
+
+        return result;
+    }
+
     protected String nullAwareURLEncode(String value)
     {
         String encoded;
@@ -93,10 +115,17 @@ public abstract class AbstractJobStatusFolderResolver implements JobStatusFolder
         return encoded;
     }
 
-    protected File getBaseFolder()
+    /**
+     * @return the base folder segments for the job status folder, override to provide a custom base folder
+     */
+    protected List<String> getBaseFolderSegments()
     {
-        return this.configuration.getStorage();
+        return List.of();
     }
 
-    protected abstract File addIDElement(String idElement, File folder);
+    /**
+     * @param idElement the id element to encode and split
+     * @return the encoded and split id element
+     */
+    protected abstract List<String> encodeAndSplit(String idElement);
 }

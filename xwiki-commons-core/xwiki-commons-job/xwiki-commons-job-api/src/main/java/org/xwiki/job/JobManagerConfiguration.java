@@ -71,4 +71,14 @@ public interface JobManagerConfiguration
     {
         return 60000L;
     }
+
+    /**
+     * @return the maximum duration in milliseconds to wait for the running jobs to finish when the job executor is
+     *         disposed (generally because XWiki is stopping), after which the jobs still running are interrupted
+     * @since 18.9.0RC1
+     */
+    default long getShutdownTimeout()
+    {
+        return 30000L;
+    }
 }

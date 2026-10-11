@@ -83,6 +83,14 @@ class DefaultJobManagerConfigurationTest
     }
 
     @Test
+    void getJobStatusRemoteCacheLifespan()
+    {
+        when(this.configurationSource.getProperty("job.statusRemoteCacheLifespan", 10)).thenReturn(30);
+
+        assertEquals(30, this.configuration.getJobStatusRemoteCacheLifespan());
+    }
+
+    @Test
     void getStorageWithProperty()
     {
         when(this.configurationSource.getProperty("job.statusFolder")).thenReturn(this.directory.toString());

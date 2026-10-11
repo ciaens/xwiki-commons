@@ -82,6 +82,12 @@ public class DefaultJobStatusStore implements JobStatusStore, Initializable
 
     private Cache<JobStatus> cache;
 
+    /**
+     * The statuses stored by other cluster members, and their absence, kept for a short time only (see
+     * {@link JobManagerConfiguration#getJobStatusRemoteCacheLifespan()}); {@code null} when disabled.
+     */
+    private Cache<JobStatus> remoteCache;
+
     private final Striped<Lock> locks = Striped.lock(16);
 
     /**
@@ -126,8 +132,39 @@ public class DefaultJobStatusStore implements JobStatusStore, Initializable
         } catch (CacheException e) {
             throw new InitializationException("Failed to initialize job status cache", e);
         }
+
+        this.remoteCache = createRemoteCache();
     }
 
+    private Cache<JobStatus> createRemoteCache() throws InitializationException
+    {
+        // Short-lived cache of the statuses stored by other cluster members
+        int remoteLifespan = this.configuration.getJobStatusRemoteCacheLifespan();
+        if (remoteLifespan <= 0) {
+            return null;
+        }
+
+        LRUCacheConfiguration remoteCacheConfiguration =
+            new LRUCacheConfiguration("job.status.remote", this.configuration.getJobStatusCacheSize());
+        remoteCacheConfiguration.getLRUEvictionConfiguration().setLifespan(remoteLifespan);
+        try {
+            return this.cacheManager.createNewCache(remoteCacheConfiguration);
+        } catch (CacheException e) {
+            throw new InitializationException("Failed to initialize the remote job status cache", e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     * <p>
+     * When the current cluster member has no status for this job, the status stored by another cluster member is
+     * returned if the persistent store is shared (see {@link PersistentJobStatusStore#loadRemoteJobStatus(List)}).
+     * Such a status is never put in the main cache: that cache only holds what the current member stored or loaded
+     * from its own persistent storage, which only the current member modifies. The status of another member, or its
+     * absence, is kept in a separate cache for at most
+     * {@link JobManagerConfiguration#getJobStatusRemoteCacheLifespan()} seconds, so it can be that old. A status stored
+     * later by the current member always replaces it.
+     */
     @Override
     public JobStatus getJobStatus(List<String> id)
     {
@@ -136,29 +173,70 @@ public class DefaultJobStatusStore implements JobStatusStore, Initializable
         JobStatus status = this.cache.get(idString);
 
         if (status == null) {
+            status = loadJobStatus(id, idString);
+        }
+
+        if (status == NOSTATUS) {
+            return getRemoteJobStatus(id, idString);
+        }
+
+        return status;
+    }
+
+    private JobStatus loadJobStatus(List<String> id, String idString)
+    {
+        JobStatus status;
+
+        Lock lock = this.locks.get(idString);
+        lock.lock();
+        try {
+            // Check again to avoid reading the same status twice. All reading happens inside the lock.
+            status = this.cache.get(idString);
+
+            if (status == null) {
+                // Check pending writes before loading from disk to avoid reading stale data during the
+                // window between cache eviction and save completion.
+                status = this.pendingWrites.get(idString);
+                if (status != null) {
+                    this.cache.set(idString, status);
+                } else {
+                    try {
+                        status = computeCacheValue(this.persistentJobStatusStore.loadJobStatus(id));
+                        this.cache.set(idString, status);
+                    } catch (Exception e) {
+                        this.logger.warn("Failed to load job status for id [{}]: [{}]", id,
+                            ExceptionUtils.getRootCauseMessage(e));
+
+                        this.cache.remove(idString);
+                    }
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+
+        return status;
+    }
+
+    private JobStatus getRemoteJobStatus(List<String> id, String idString)
+    {
+        if (this.remoteCache == null) {
+            return loadRemoteJobStatus(id);
+        }
+
+        JobStatus status = this.remoteCache.get(idString);
+
+        if (status == null) {
+            // Same lock as the local load, so that concurrent requests for the same job do a single lookup.
             Lock lock = this.locks.get(idString);
             lock.lock();
             try {
-                // Check again to avoid reading the same status twice. All reading happens inside the lock.
-                status = this.cache.get(idString);
+                status = this.remoteCache.get(idString);
 
                 if (status == null) {
-                    // Check pending writes before loading from disk to avoid reading stale data during the
-                    // window between cache eviction and save completion.
-                    status = this.pendingWrites.get(idString);
-                    if (status != null) {
-                        this.cache.set(idString, status);
-                    } else {
-                        try {
-                            status = this.persistentJobStatusStore.loadJobStatus(id);
-                            this.cache.set(idString, computeCacheValue(status));
-                        } catch (Exception e) {
-                            this.logger.warn("Failed to load job status for id [{}]: [{}]", id,
-                                ExceptionUtils.getRootCauseMessage(e));
-
-                            this.cache.remove(idString);
-                        }
-                    }
+                    // A failed lookup is cached as an absence too, to not repeat it (and its warning) on every request.
+                    status = computeCacheValue(loadRemoteJobStatus(id));
+                    this.remoteCache.set(idString, status);
                 }
             } finally {
                 lock.unlock();
@@ -166,6 +244,18 @@ public class DefaultJobStatusStore implements JobStatusStore, Initializable
         }
 
         return status == NOSTATUS ? null : status;
+    }
+
+    private JobStatus loadRemoteJobStatus(List<String> id)
+    {
+        try {
+            return this.persistentJobStatusStore.loadRemoteJobStatus(id);
+        } catch (Exception e) {
+            this.logger.warn("Failed to load the job status for id [{}] stored by another cluster member: [{}]", id,
+                ExceptionUtils.getRootCauseMessage(e));
+
+            return null;
+        }
     }
 
     private static @NonNull JobStatus computeCacheValue(JobStatus status)
@@ -185,6 +275,12 @@ public class DefaultJobStatusStore implements JobStatusStore, Initializable
         store(status, true);
     }
 
+    /**
+     * {@inheritDoc}
+     * <p>
+     * Only the status of the current cluster member is removed: a status stored by another member can still be
+     * returned by {@link #getJobStatus(List)} afterwards.
+     */
     @Override
     public void remove(List<String> id)
     {

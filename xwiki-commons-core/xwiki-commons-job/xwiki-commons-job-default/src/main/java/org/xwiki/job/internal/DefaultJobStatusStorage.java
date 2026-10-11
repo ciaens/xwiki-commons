@@ -34,7 +34,7 @@ import org.xwiki.job.event.status.JobStatus;
  *
  * @version $Id$
  * @since 4.0M1
- * @deprecated use {@link org.xwiki.job.internal.DefaultJobStatusStore} instead
+ * @deprecated use {@link DefaultJobStatusStore} instead
  */
 @Component
 @Singleton

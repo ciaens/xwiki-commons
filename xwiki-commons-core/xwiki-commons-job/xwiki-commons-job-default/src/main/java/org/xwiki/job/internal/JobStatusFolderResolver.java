@@ -44,4 +44,12 @@ public interface JobStatusFolderResolver
      * @throws JobException when failing to get the folder for the job status
      */
     File getFolder(List<String> jobID) throws JobException;
+
+    /**
+     * @param jobID the ID of the job for which the segments of the folder path shall be retrieved
+     * @return the segments of the folder path for the job status and log according to the resolver, starting from
+     * the configured storage directory
+     * @since 18.3.0RC1
+     */
+    List<String> getFolderSegments(List<String> jobID);
 }

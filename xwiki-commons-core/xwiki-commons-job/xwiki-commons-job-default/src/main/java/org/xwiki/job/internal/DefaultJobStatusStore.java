@@ -76,8 +76,8 @@ import org.xwiki.logging.tail.LoggerTail;
 @SuppressWarnings("checkstyle:ClassFanOutComplexity")
 @Component
 @Singleton
-// Disposed after the job executor (default priority), which waits for the running jobs and lets them store their final
-// status, but before the stores (10000) the status cache may rely on
+// Disposed after the job executor (priority 100, the first component disposed), which waits for the running jobs and
+// lets them store their final status, but before the stores (10000) the status cache may rely on
 @DisposePriority(5000)
 public class DefaultJobStatusStore implements JobStatusStore, Initializable, Disposable
 {

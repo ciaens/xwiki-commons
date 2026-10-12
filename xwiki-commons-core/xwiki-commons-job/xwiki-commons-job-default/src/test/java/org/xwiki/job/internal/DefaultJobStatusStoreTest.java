@@ -19,65 +19,52 @@
  */
 package org.xwiki.job.internal;
 
-import java.io.File;
-import java.io.Serial;
-import java.nio.charset.StandardCharsets;
-import java.util.Arrays;
+import java.io.IOException;
 import java.util.List;
-import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
 
-import javax.inject.Provider;
-
-import org.apache.commons.io.FileUtils;
-import org.apache.commons.lang3.StringUtils;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import org.mockito.stubbing.Answer;
-import org.slf4j.Logger;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.xwiki.cache.Cache;
+import org.xwiki.cache.CacheException;
 import org.xwiki.cache.CacheManager;
-import org.xwiki.cache.internal.MapCache;
-import org.xwiki.component.manager.ComponentManager;
+import org.xwiki.cache.config.CacheConfiguration;
+import org.xwiki.cache.config.LRUCacheConfiguration;
 import org.xwiki.component.util.ReflectionUtils;
-import org.xwiki.job.AbstractJobStatus;
 import org.xwiki.job.DefaultJobStatus;
 import org.xwiki.job.DefaultRequest;
 import org.xwiki.job.JobManagerConfiguration;
-import org.xwiki.job.Request;
-import org.xwiki.job.annotation.Serializable;
 import org.xwiki.job.event.status.JobStatus;
-import org.xwiki.job.internal.xstream.SerializableXStreamChecker;
-import org.xwiki.job.test.SerializableStandaloneComponent;
-import org.xwiki.job.test.StandaloneComponent;
-import org.xwiki.job.test.UnserializableJobStatus;
-import org.xwiki.logging.LoggerManager;
-import org.xwiki.logging.event.LogEvent;
-import org.xwiki.logging.internal.tail.XStreamFileLoggerTail;
-import org.xwiki.logging.marker.TranslationMarker;
 import org.xwiki.logging.tail.LoggerTail;
 import org.xwiki.test.LogLevel;
-import org.xwiki.test.TestEnvironment;
-import org.xwiki.test.XWikiTempDirUtil;
 import org.xwiki.test.annotation.BeforeComponent;
-import org.xwiki.test.annotation.ComponentList;
 import org.xwiki.test.junit5.LogCaptureExtension;
 import org.xwiki.test.junit5.mockito.ComponentTest;
-import org.xwiki.test.junit5.mockito.InjectComponentManager;
 import org.xwiki.test.junit5.mockito.InjectMockComponents;
 import org.xwiki.test.junit5.mockito.MockComponent;
-import org.xwiki.test.mockito.MockitoComponentManager;
-import org.xwiki.xstream.internal.SafeXStream;
-import org.xwiki.xstream.internal.XStreamUtils;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
@@ -87,388 +74,430 @@ import static org.mockito.Mockito.when;
  * @version $Id$
  */
 @ComponentTest
-// @formatter:off
-@ComponentList({
-    SafeXStream.class,
-    XStreamUtils.class,
-    SerializableXStreamChecker.class,
-    JobStatusSerializer.class,
-    XStreamFileLoggerTail.class,
-    TestEnvironment.class,
-    // Add all components to ensure that the priority works as expected.
-    Version1JobStatusFolderResolver.class,
-    Version2JobStatusFolderResolver.class,
-    Version3JobStatusFolderResolver.class
-})
-// @formatter:on
 class DefaultJobStatusStoreTest
 {
-    private static final List<String> ID = List.of("test");
+    private static final List<String> ID = List.of("id1", "id2");
 
-    private static final String STATUS_XML_ZIP = "status.xml.zip";
+    private static final String ID_STRING = "id1/id2";
 
-    private static final String STATUS_XML = "status.xml";
+    private static final String ERROR = "error";
 
-    @Serializable
-    private static class SerializableCrossReferenceObject
-    {
-        public SerializableCrossReferenceObject field;
+    private static final String TYPE = "type";
 
-        public SerializableCrossReferenceObject()
-        {
-            this.field = this;
-        }
-    }
+    private static final String REMOTE_CACHE_ID = "job.status.remote";
 
-    @Serializable
-    private static class SerializableProvider implements Provider<String>
-    {
-        @Override
-        public String get()
-        {
-            return null;
-        }
-    }
+    private static final int REMOTE_LIFESPAN = 10;
 
-    private static class SerializableImplementationProvider implements Provider<String>, java.io.Serializable
-    {
-        @Serial
-        private static final long serialVersionUID = 1L;
-
-        @Override
-        public String get()
-        {
-            return null;
-        }
-    }
-
-    @Serializable
-    private static class SerializableObjectTest
-    {
-        public Object field;
-
-        public SerializableObjectTest(Object field)
-        {
-            this.field = field;
-        }
-    }
-
-    @Serializable
-    private static class CustomSerializableObject
-    {
-        public String field;
-
-        public CustomSerializableObject(String field)
-        {
-            this.field = field;
-        }
-
-        @Override
-        public boolean equals(Object obj)
-        {
-            return Objects.equals(((CustomSerializableObject) obj).field, this.field);
-        }
-    }
-
-    @Serializable
-    private static class SerializableCustomObject
-    {
-        public String field;
-
-        public SerializableCustomObject(String field)
-        {
-            this.field = field;
-        }
-
-        @Override
-        public boolean equals(Object obj)
-        {
-            return Objects.equals(((SerializableCustomObject) obj).field, this.field);
-        }
-    }
-
-    @Serializable(false)
-    private static class NotSerializableCustomObject
-    {
-        public String field;
-
-        public NotSerializableCustomObject(String field)
-        {
-            this.field = field;
-        }
-
-        @Override
-        public boolean equals(Object obj)
-        {
-            return Objects.equals(((NotSerializableCustomObject) obj).field, this.field);
-        }
-
-        @Override
-        public String toString()
-        {
-            return this.field;
-        }
-    }
-
-    @SuppressWarnings("serial")
-    private static class TestException extends Exception
-    {
-        private Object custom;
-
-        public TestException(String message, Throwable cause, Object custom)
-        {
-            super(message, cause);
-
-            this.custom = custom;
-        }
-
-        public Object getCustom()
-        {
-            return this.custom;
-        }
-    }
+    @RegisterExtension
+    private final LogCaptureExtension logCapture = new LogCaptureExtension(LogLevel.WARN);
 
     @InjectMockComponents
     private DefaultJobStatusStore store;
 
-    @InjectComponentManager
-    private MockitoComponentManager componentManager;
-
     @MockComponent
-    private JobManagerConfiguration jobManagerConfiguration;
-
-    @MockComponent
-    private LoggerManager loggerManager;
+    private PersistentJobStatusStore persistentJobStatusStore;
 
     @MockComponent
     private CacheManager cacheManager;
 
-    @RegisterExtension
-    private LogCaptureExtension logCapture = new LogCaptureExtension(LogLevel.WARN);
+    @MockComponent
+    private JobManagerConfiguration configuration;
 
-    private File storeDirectory;
+    private Cache<JobStatus> cache;
 
-    private File wrongDirectory;
-
-    private File wrongDirectory2;
-
-    private File correctDirectory;
-
-    private File wrongStatusInCorrectDirectory;
+    private ExpiringMapCache<JobStatus> remoteCache;
 
     @BeforeComponent
     void before() throws Exception
     {
-        this.storeDirectory = XWikiTempDirUtil.createTemporaryDirectory();
-
-        FileUtils.copyDirectory(new File("src/test/resources/jobs/status/"), this.storeDirectory);
-
-        this.wrongDirectory = new File(this.storeDirectory, "wrong/location");
-        this.wrongDirectory2 = new File(this.storeDirectory, "wrong/location2");
-        this.correctDirectory = new File(this.storeDirectory, "3/correct/location");
-        assertTrue(this.wrongDirectory.isDirectory(), "Directory copied from resources doesn't exist.");
-
-        File mostRecentFile = new File(this.wrongDirectory, STATUS_XML_ZIP);
-        File oldestFile = new File(this.wrongDirectory2, STATUS_XML_ZIP);
-        File middleFile = new File(this.correctDirectory, "status.xml");
-        this.wrongStatusInCorrectDirectory = middleFile;
-
-        assertTrue(mostRecentFile.exists());
-        assertTrue(oldestFile.exists());
-        assertTrue(middleFile.exists());
-
-        assertTrue(mostRecentFile.setLastModified(System.currentTimeMillis()));
-        assertTrue(oldestFile.setLastModified(System.currentTimeMillis() - 4000));
-        assertTrue(middleFile.setLastModified(System.currentTimeMillis() - 2000));
-
-        when(this.jobManagerConfiguration.getStorage()).thenReturn(this.storeDirectory);
-        when(this.jobManagerConfiguration.getJobStatusCacheSize()).thenReturn(100);
-
-        when(this.cacheManager.createNewCache(any())).thenReturn(new MapCache<>());
-
-        when(this.loggerManager.createLoggerTail(any(), anyBoolean())).then(
-            (Answer<LoggerTail>) invocation -> {
-                XStreamFileLoggerTail loggerTail = componentManager.getInstance(XStreamFileLoggerTail.class);
-                loggerTail.initialize(invocation.getArgument(0), invocation.getArgument(1));
-                return loggerTail;
+        when(this.configuration.getJobStatusCacheSize()).thenReturn(100);
+        when(this.configuration.getJobStatusRemoteCacheLifespan()).thenReturn(REMOTE_LIFESPAN);
+        this.cache = spy(new ExpiringMapCache<>(0));
+        // The remote cache expires its entries after the configured lifespan, on a clock moved by the tests.
+        doAnswer(invocation -> {
+            CacheConfiguration configuration = invocation.getArgument(0);
+            if (configuration != null && REMOTE_CACHE_ID.equals(configuration.getConfigurationId())) {
+                this.remoteCache = new ExpiringMapCache<>(
+                    ((LRUCacheConfiguration) configuration).getLRUEvictionConfiguration().getLifespan());
+                return this.remoteCache;
             }
-        );
+            return this.cache;
+        }).when(this.cacheManager).createNewCache(any());
     }
 
-    private DefaultJobStatus<Request> createStatus()
+    private ExecutorService mockExecutor() throws InterruptedException
     {
-        return createStatus(true);
+        ExecutorService executor = mock();
+        // The store waits for the executor when it is disposed at the end of the test
+        when(executor.awaitTermination(anyLong(), any(TimeUnit.class))).thenReturn(true);
+        ReflectionUtils.setFieldValue(this.store, "executorService", executor);
+
+        return executor;
     }
 
-    private DefaultJobStatus<Request> createStatus(boolean logTail)
+    @Test
+    void initializeWhenCacheCreationFails() throws CacheException
+    {
+        when(this.configuration.getJobStatusCacheSize()).thenReturn(100);
+        when(this.cacheManager.createNewCache(any())).thenThrow(new CacheException(ERROR));
+
+        assertThrows(Exception.class, () -> this.store.initialize());
+    }
+
+    @Test
+    void getJobStatusWhenCacheHit()
+    {
+        JobStatus status = mock();
+
+        when(this.cache.get(ID_STRING)).thenReturn(status);
+
+        assertSame(status, this.store.getJobStatus(ID));
+
+        verify(this.cache).get(ID_STRING);
+        verifyNoInteractions(this.persistentJobStatusStore);
+    }
+
+    @Test
+    void getJobStatusWhenCacheMissThenLoadedAndCached() throws Exception
+    {
+        JobStatus status = mock();
+
+        when(this.cache.get(ID_STRING)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(status);
+
+        assertSame(status, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore).loadJobStatus(ID);
+        verify(this.cache).set(ID_STRING, status);
+    }
+
+    @Test
+    void getJobStatusWhenCacheMissThenSecondCheckAvoidsRead()
+    {
+        JobStatus status = mock();
+
+        when(this.cache.get(ID_STRING)).thenReturn(null, status);
+
+        assertSame(status, this.store.getJobStatus(ID));
+
+        verify(this.cache, times(2)).get(ID_STRING);
+        verifyNoInteractions(this.persistentJobStatusStore);
+    }
+
+    @Test
+    void getJobStatusWhenLoadFailsRemovesCacheAndLogs() throws Exception
+    {
+        when(this.cache.get(ID_STRING)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenThrow(new IOException(ERROR));
+
+        assertNull(this.store.getJobStatus(ID));
+
+        verify(this.cache).remove(ID_STRING);
+        verify(this.persistentJobStatusStore, never()).loadRemoteJobStatus(any());
+        assertEquals("Failed to load job status for id [[id1, id2]]: [IOException: error]", logCapture.getMessage(0));
+    }
+
+    @Test
+    void initializeCreatesShortLivedRemoteCache() throws Exception
+    {
+        ArgumentCaptor<CacheConfiguration> captor = ArgumentCaptor.captor();
+        verify(this.cacheManager, times(2)).createNewCache(captor.capture());
+
+        LRUCacheConfiguration remoteConfiguration = (LRUCacheConfiguration) captor.getAllValues().get(1);
+        assertEquals(REMOTE_CACHE_ID, remoteConfiguration.getConfigurationId());
+        assertEquals(100, remoteConfiguration.getLRUEvictionConfiguration().getMaxEntries());
+        assertEquals(REMOTE_LIFESPAN, remoteConfiguration.getLRUEvictionConfiguration().getLifespan());
+    }
+
+    @Test
+    void getJobStatusWhenOnlyStoredByAnotherMember() throws Exception
+    {
+        JobStatus remoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(remoteStatus);
+
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        // The main cache only holds the local absence, the status of the other member is in the remote cache.
+        assertNotNull(this.cache.get(ID_STRING));
+        assertNotSame(remoteStatus, this.cache.get(ID_STRING));
+        assertSame(remoteStatus, this.remoteCache.get(ID_STRING));
+        verify(this.persistentJobStatusStore).loadJobStatus(ID);
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusWhenNoMemberHasAStatusIsNotQueriedAgainDuringTheLifespan() throws Exception
+    {
+        JobStatus remoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(null, remoteStatus);
+
+        for (int i = 0; i < 5; ++i) {
+            assertNull(this.store.getJobStatus(ID));
+        }
+        this.remoteCache.advance(REMOTE_LIFESPAN - 1);
+        assertNull(this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
+
+        // Once the lifespan is over, the status stored meanwhile by another member is found.
+        this.remoteCache.advance(1);
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore, times(2)).loadRemoteJobStatus(ID);
+        verify(this.persistentJobStatusStore).loadJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusSeesANewerRemoteStatusAfterTheLifespan() throws Exception
+    {
+        JobStatus firstRemoteStatus = mock();
+        JobStatus secondRemoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(firstRemoteStatus,
+            secondRemoteStatus);
+
+        assertSame(firstRemoteStatus, this.store.getJobStatus(ID));
+        this.remoteCache.advance(REMOTE_LIFESPAN - 1);
+        assertSame(firstRemoteStatus, this.store.getJobStatus(ID));
+        this.remoteCache.advance(1);
+        assertSame(secondRemoteStatus, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore, times(2)).loadRemoteJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusWhenRemoteCacheIsDisabled() throws Exception
+    {
+        when(this.configuration.getJobStatusRemoteCacheLifespan()).thenReturn(0);
+        this.store.initialize();
+
+        JobStatus remoteStatus = mock();
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(null, remoteStatus);
+
+        assertNull(this.store.getJobStatus(ID));
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore, times(2)).loadRemoteJobStatus(ID);
+    }
+
+    @Test
+    void getJobStatusWhenRemoteLoadFails() throws Exception
+    {
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenThrow(new IOException(ERROR));
+
+        assertNull(this.store.getJobStatus(ID));
+        // The failure is cached as an absence: no second lookup and no second warning during the lifespan.
+        assertNull(this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
+        assertEquals(1, this.logCapture.size());
+        assertEquals("Failed to load the job status for id [[id1, id2]] stored by another cluster member: "
+            + "[IOException: error]", this.logCapture.getMessage(0));
+    }
+
+    @Test
+    void getJobStatusWhenStoredLocallyAfterRemoteRead() throws Exception
     {
         DefaultRequest request = new DefaultRequest();
         request.setId(ID);
+        JobStatus localStatus = new DefaultJobStatus<>(TYPE, request, null, null, null);
+        JobStatus remoteStatus = mock();
 
-        DefaultJobStatus<Request> status = new DefaultJobStatus<>("type", request, null, null, null);
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(remoteStatus);
 
-        if (logTail) {
-            status.setLoggerTail(this.store.createLoggerTail(ID, false));
-        }
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
 
-        return status;
+        // The job is then executed by the current member: its own status replaces the cached absence and wins over
+        // the cached status of the other member.
+        this.store.store(localStatus);
+
+        assertSame(localStatus, this.store.getJobStatus(ID));
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
     }
 
-    private <S extends JobStatus> S getStatus()
+    @Test
+    void getJobStatusWhenLocalAbsenceIsEvicted() throws Exception
     {
-        return (S) this.store.getJobStatus(ID);
+        JobStatus remoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(remoteStatus);
+
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        // The local absence leaves the main cache (LRU eviction): the local storage is read again, then the remote
+        // cache answers.
+        this.cache.remove(ID_STRING);
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore, times(2)).loadJobStatus(ID);
+        verify(this.persistentJobStatusStore).loadRemoteJobStatus(ID);
     }
 
-    private <S extends JobStatus> S storeGet(S status) throws Exception
+    @Test
+    void getJobStatusAfterRemoveReturnsTheStatusOfAnotherMember() throws Exception
     {
-        if (status instanceof AbstractJobStatus) {
-            ((AbstractJobStatus<?>) status).getLoggerTail().close();
-        }
+        JobStatus localStatus = mock();
+        JobStatus remoteStatus = mock();
+
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(localStatus, (JobStatus) null);
+        when(this.persistentJobStatusStore.loadRemoteJobStatus(ID)).thenReturn(remoteStatus);
+
+        assertSame(localStatus, this.store.getJobStatus(ID));
+        verify(this.persistentJobStatusStore, never()).loadRemoteJobStatus(any());
+
+        // Only the status of the current member is removed.
+        this.store.remove(ID);
+
+        assertSame(remoteStatus, this.store.getJobStatus(ID));
+    }
+
+    @Test
+    void getJobStatusWhenLoadReturnsNullCachesSentinel() throws Exception
+    {
+        when(this.cache.get(ID_STRING)).thenReturn(null);
+        when(this.persistentJobStatusStore.loadJobStatus(ID)).thenReturn(null);
+
+        assertNull(this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore).loadJobStatus(ID);
+
+        // Verify a non-null sentinel was cached to avoid repeated disk reads for missing statuses.
+        ArgumentCaptor<JobStatus> captor = ArgumentCaptor.captor();
+        verify(this.cache).set(eq(ID_STRING), captor.capture());
+        assertNotNull(captor.getValue());
+    }
+
+    @Test
+    void getJobStatusWhenPendingWriteExists() throws Exception
+    {
+        ExecutorService executor = mockExecutor();
+
+        DefaultRequest request = new DefaultRequest();
+        request.setId(ID);
+        request.setStatusSerialized(true);
+
+        JobStatus status = new DefaultJobStatus<>(TYPE, request, null, null, null);
+
+        // Store async to create a pending write (executor mock won't actually run the task).
+        this.store.storeAsync(status);
+
+        // Simulate cache eviction by making get() return null.
+        when(this.cache.get(ID_STRING)).thenReturn(null);
+
+        // getJobStatus should find the pending write instead of loading from disk.
+        assertSame(status, this.store.getJobStatus(ID));
+
+        verify(this.persistentJobStatusStore, never()).loadJobStatus(any());
+        verify(this.persistentJobStatusStore, never()).loadRemoteJobStatus(any());
+    }
+
+    @Test
+    void removeDelegatesAndEvictsCache() throws Exception
+    {
+        this.store.remove(ID);
+
+        verify(this.persistentJobStatusStore).removeJobStatus(ID);
+        verify(this.cache).remove(ID_STRING);
+    }
+
+    @Test
+    void removeWhenPersistenceFailsKeepsCacheAndLogs() throws Exception
+    {
+        doThrow(new IOException(ERROR)).when(this.persistentJobStatusStore).removeJobStatus(ID);
+
+        this.store.remove(ID);
+
+        verify(this.cache, never()).remove(ID_STRING);
+        assertEquals("Failed to remove job status for id [[id1, id2]]: [IOException: error]", logCapture.getMessage(0));
+    }
+
+    @Test
+    void storeWithNullStatusDoesNothing()
+    {
+        this.store.store(null);
+
+        verifyNoInteractions(this.cache);
+        verifyNoInteractions(this.persistentJobStatusStore);
+    }
+
+    @Test
+    void storeWithNullRequestDoesNothing()
+    {
+        JobStatus status = new DefaultJobStatus<>(TYPE, null, null, null, null);
 
         this.store.store(status);
 
-        this.store.flushCache();
-
-        return getStatus();
+        verifyNoInteractions(this.cache);
+        verifyNoInteractions(this.persistentJobStatusStore);
     }
 
     @Test
-    void jobStatusAndLogMoved()
+    void storeWithNullIdDoesNothing()
     {
-        JobStatus status = this.store.getJobStatus(List.of("correct", "location"));
-        assertNotNull(status);
-        LogEvent lastLogEvent = status.getLogTail().getLastLogEvent();
-        assertNotNull(lastLogEvent);
-        // Verify that we got the correct job.
-        assertEquals("Finished correct job of type [{}] with identifier [{}]", lastLogEvent.getMessage());
+        JobStatus status = new DefaultJobStatus<>(TYPE, new DefaultRequest(), null, null, null);
 
-        assertFalse(this.wrongDirectory.exists());
-        assertFalse(this.wrongDirectory.getParentFile().exists());
-        assertFalse(this.wrongDirectory2.exists());
-        assertFalse(this.wrongStatusInCorrectDirectory.exists());
-        assertTrue(new File(this.correctDirectory, STATUS_XML_ZIP).exists());
-        assertTrue(new File(this.correctDirectory, "log.index").exists());
-        assertTrue(new File(this.correctDirectory, "log.xml").exists());
+        this.store.store(status);
+
+        verifyNoInteractions(this.cache);
+        verifyNoInteractions(this.persistentJobStatusStore);
     }
 
     @Test
-    void getJobStatusWithNullId()
+    void storeSerializableSavesSynchronously() throws Exception
     {
-        JobStatus jobStatus = this.store.getJobStatus(null);
+        DefaultRequest request = new DefaultRequest();
+        request.setId(ID);
+        request.setStatusSerialized(true);
 
-        assertNotNull(jobStatus);
-        assertNull(jobStatus.getRequest().getId());
-        assertEquals(JobStatus.State.FINISHED, jobStatus.getState());
+        JobStatus status = new DefaultJobStatus<>(TYPE, request, null, null, null);
 
-        assertSame(jobStatus, this.store.getJobStatus(null));
+        this.store.store(status);
+
+        verify(this.cache).set(ID_STRING, status);
+        verify(this.persistentJobStatusStore).saveJobStatus(status);
     }
 
     @Test
-    void getJobStatusWithMultipleId()
+    void storeAsyncSerializableSchedulesSave() throws Exception
     {
-        JobStatus jobStatus = this.store.getJobStatus(Arrays.asList("id1", "id2"));
+        ExecutorService executor = mockExecutor();
 
-        assertNotNull(jobStatus);
-        assertEquals(Arrays.asList("id1", "id2"), jobStatus.getRequest().getId());
-        assertEquals(JobStatus.State.FINISHED, jobStatus.getState());
+        DefaultRequest request = new DefaultRequest();
+        request.setId(ID);
+        request.setStatusSerialized(true);
 
-        assertSame(jobStatus, this.store.getJobStatus(Arrays.asList("id1", "id2")));
-    }
+        JobStatus status = new DefaultJobStatus<>(TYPE, request, null, null, null);
 
-    @Test
-    void getJobStatusInOldPlace()
-    {
-        JobStatus jobStatus = this.store.getJobStatus(Arrays.asList("id1", "id2", "id3"));
+        this.store.storeAsync(status);
 
-        assertNotNull(jobStatus);
-        assertEquals(Arrays.asList("id1", "id2", "id3"), jobStatus.getRequest().getId());
-        assertEquals(JobStatus.State.FINISHED, jobStatus.getState());
-    }
+        verify(this.cache).set(ID_STRING, status);
 
-    @Test
-    void getJobStatusInWrongPlaceAndWithInvalidLogArgument()
-    {
-        JobStatus jobStatus = this.store.getJobStatus(List.of("invalidlogargument"));
+        ArgumentCaptor<Runnable> runnableCaptor = ArgumentCaptor.captor();
+        verify(executor).execute(runnableCaptor.capture());
 
-        assertNotNull(jobStatus);
-        assertEquals(3, jobStatus.getLog().size());
-    }
+        runnableCaptor.getValue().run();
 
-    @Test
-    void getJobStatusThatDoesNotExist()
-    {
-        JobStatus jobStatus = this.store.getJobStatus(List.of("nostatus"));
-
-        assertNull(jobStatus);
-
-        JobStatusSerializer mockSerializer = mock();
-        ReflectionUtils.setFieldValue(this.store, "serializer", mockSerializer);
-
-        jobStatus = this.store.getJobStatus(List.of("nostatus"));
-        assertNull(jobStatus);
-
-        verifyNoMoreInteractions(mockSerializer);
-    }
-
-    @Test
-    void removeJobStatus()
-    {
-        List<String> id = null;
-
-        JobStatus jobStatus = this.store.getJobStatus(id);
-
-        assertNotNull(jobStatus);
-        assertNull(jobStatus.getRequest().getId());
-        assertEquals(JobStatus.State.FINISHED, jobStatus.getState());
-
-        assertSame(jobStatus, this.store.getJobStatus(id));
-
-        this.store.remove(id);
-
-        assertSame(null, this.store.getJobStatus(id));
-    }
-
-    @Test
-    void removeNotExistingJobStatus()
-    {
-        assertDoesNotThrow(() -> this.store.remove(List.of("notexist")));
-    }
-
-    @Test
-    void getJobStatusWithIdEscapingTheStorageFolder()
-    {
-        // The id escapes the storage folder for some of the resolvers only, the store must skip those instead of
-        // failing.
-        assertNull(this.store.getJobStatus(List.of("..")));
-    }
-
-    @Test
-    void removeJobStatusWithIdEscapingTheStorageFolder() throws Exception
-    {
-        // A job id element that survives the encoding of a resolver must not make the store delete status files
-        // located outside of the storage folder.
-        File outsideStatusFile = new File(this.storeDirectory.getParentFile(), STATUS_XML);
-        FileUtils.write(outsideStatusFile, "outside", StandardCharsets.UTF_8);
-
-        try {
-            assertDoesNotThrow(() -> this.store.remove(List.of("..")));
-
-            assertTrue(outsideStatusFile.exists(),
-                "The status file located outside of the storage folder has been deleted.");
-
-            assertEquals("Failed to get job folder for id [[..]] when using resolver "
-                + "[org.xwiki.job.internal.Version1JobStatusFolderResolver]: "
-                + "[JobException: The job id element [..] is resolved outside its parent folder]",
-                this.logCapture.getMessage(0));
-        } finally {
-            FileUtils.deleteQuietly(outsideStatusFile);
-        }
+        verify(this.persistentJobStatusStore).saveJobStatus(status);
     }
 
     @Test
     void storeAsyncAfterDispose() throws Exception
     {
-        DefaultJobStatus<Request> status = createStatus(false);
+        DefaultRequest request = new DefaultRequest();
+        request.setId(ID);
+        request.setStatusSerialized(true);
+
+        DefaultJobStatus<DefaultRequest> status = new DefaultJobStatus<>(TYPE, request, null, null, null);
         status.setState(JobStatus.State.FINISHED);
 
         this.store.dispose();
@@ -476,423 +505,61 @@ class DefaultJobStatusStoreTest
         // The asynchronous executor is shut down: the status is stored synchronously instead of being lost
         this.store.storeAsync(status);
 
-        this.store.flushCache();
-
-        JobStatus storedStatus = getStatus();
-        assertNotNull(storedStatus);
-        assertEquals(ID, storedStatus.getRequest().getId());
-        assertEquals(JobStatus.State.FINISHED, storedStatus.getState());
+        verify(this.cache).set(ID_STRING, status);
+        verify(this.persistentJobStatusStore).saveJobStatus(status);
     }
 
     @Test
-    void storeNullJobStatus()
+    void disposeSavesPendingWrites() throws Exception
     {
-        assertDoesNotThrow(() ->this.store.store(null));
-    }
-
-    @Test
-    void storeJobStatusWithNullRequest()
-    {
-        JobStatus jobStatus = new DefaultJobStatus<>("type", null, null, null, null);
-        assertDoesNotThrow(() -> this.store.store(jobStatus));
-    }
-
-    @Test
-    void storeJobStatusWithNullId()
-    {
-        JobStatus jobStatus = new DefaultJobStatus<>("type", new DefaultRequest(), null, null, null);
-        assertDoesNotThrow(() -> this.store.store(jobStatus));
-    }
-
-    @Test
-    void storeJobStatusWithBigId()
-    {
-        DefaultRequest request = new DefaultRequest();
-        request.setId(StringUtils.repeat('a', 768));
-
-        JobStatus jobStatus = new DefaultJobStatus<>("type", request, null, null, null);
-
-        this.store.store(jobStatus);
-
-        String longAName = StringUtils.repeat('a', 250);
-
-        assertTrue(new File(this.storeDirectory,
-            "3/%s/%s/%s/aaaaaaaaaaaaaaaaaa/status.xml.zip".formatted(longAName, longAName, longAName)).exists());
-    }
-
-    @Test
-    void storeJobStatusWithNullPartInId()
-    {
-        DefaultRequest request = new DefaultRequest();
-        request.setId("first", null, "second");
-
-        JobStatus jobStatus = new DefaultJobStatus<>("type", request, null, null, null);
-
-        this.store.store(jobStatus);
-
-        assertTrue(new File(this.storeDirectory, "3/first/&null/second/status.xml.zip").exists());
-    }
-
-    @Test
-    void storeJobStatusWithProblematicCharacters()
-    {
-        DefaultRequest request = new DefaultRequest();
-        request.setId("..", ".", " .*.");
-
-        JobStatus jobStatus = new DefaultJobStatus<>("type", request, null, null, null);
-
-        this.store.store(jobStatus);
-
-        assertTrue(new File(this.storeDirectory, "3/%2E%2E/%2E/%20.%2A%2E/status.xml.zip").exists());
-    }
-
-    @Test
-    void storeUnserializableJobStatus()
-    {
-        List<String> id = List.of("test");
-        DefaultRequest request = new DefaultRequest();
-        request.setId(id);
-        JobStatus jobStatus = new UnserializableJobStatus("type", request, null, null, null);
-
-        this.store.store(jobStatus);
-
-        // Verify that the status hasn't been serialized, indirectly verifying that isSerializable() has been called and
-        // returned true.
-        assertFalse(new File(this.storeDirectory, "3/test/status.xml").exists());
-    }
-
-    @Test
-    void storeUnserializedJobStatus()
-    {
-        List<String> id = List.of("test");
-        DefaultRequest request = new DefaultRequest();
-        request.setId(id);
-        request.setStatusSerialized(false);
-        JobStatus jobStatus = new DefaultJobStatus<>("type", request, null, null, null);
-
-        this.store.store(jobStatus);
-
-        // Verify that the status hasn't been serialized, indirectly verifying that isSerializable() has been called and
-        // returned true.
-        assertFalse(new File(this.storeDirectory, "3/test/status.xml").exists());
-    }
-
-    @Test
-    void storeJobStatusWhenSerializable()
-    {
-        List<String> id = List.of("newstatus");
+        ExecutorService executor = mockExecutor();
+        doThrow(new RejectedExecutionException(ERROR)).when(executor).execute(any());
 
         DefaultRequest request = new DefaultRequest();
-        request.setId(id);
-        JobStatus jobStatus = new DefaultJobStatus<>("type", request, null, null, null);
+        request.setId(ID);
+        request.setStatusSerialized(true);
 
-        this.store.store(jobStatus);
+        JobStatus status = new DefaultJobStatus<>(TYPE, request, null, null, null);
 
-        assertSame(jobStatus, this.store.getJobStatus(id));
+        // A saturated executor rejects the asynchronous serialization while the store is not disposed
+        assertThrows(RejectedExecutionException.class, () -> this.store.storeAsync(status));
+        verify(this.persistentJobStatusStore, never()).saveJobStatus(status);
 
-        // Verify that the status has been serialized, indirectly verifying that isSerializable() has been called and
-        // returned true.
-        assertTrue(new File(this.storeDirectory, "3/%s/status.xml.zip".formatted(id.getFirst())).exists());
+        // The status that is still waiting to be written is saved when the store is disposed
+        this.store.dispose();
+
+        verify(executor).shutdown();
+        verify(this.persistentJobStatusStore).saveJobStatus(status);
     }
 
     @Test
-    void serializeUnserializeWhenLogMessage() throws Exception
+    void storeSerializableWhenSaveFailsLogs() throws Exception
     {
-        DefaultJobStatus<Request> status = createStatus();
+        DefaultRequest request = new DefaultRequest();
+        request.setId(ID);
+        request.setStatusSerialized(true);
 
-        status.getLoggerTail().error("error message");
+        JobStatus status = new DefaultJobStatus<>(TYPE, request, null, null, null);
 
-        status = storeGet(status);
+        doThrow(new IOException(ERROR)).when(this.persistentJobStatusStore).saveJobStatus(status);
 
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
+        this.store.store(status);
+
+        assertEquals("Failed to save job status for id [[id1, id2]]: [IOException: error]", logCapture.getMessage(0));
     }
 
-    @Test
-    void serializeUnserializeWhenLogMarker() throws Exception
+    @ParameterizedTest
+    @ValueSource(booleans = { true, false })
+    void createLoggerTailDelegates(boolean readonly) throws Exception
     {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error(new TranslationMarker("translation.key"), "error message");
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals(new TranslationMarker("translation.key"),
-            Objects.requireNonNull(status.getLog().peek()).getMarker());
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithException() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message",
-            new TestException("exception message", new Exception("cause"), "custom"));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals("exception message", Objects.requireNonNull(status.getLog().peek()).getThrowable().getMessage());
-        assertEquals("cause", Objects.requireNonNull(status.getLog().peek()).getThrowable().getCause().getMessage());
-        assertNull(((TestException) Objects.requireNonNull(status.getLog().peek()).getThrowable()).getCustom(),
-            "exception message");
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithArguments() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", "arg1", "arg2");
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals("arg1", Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[0]);
-        assertEquals("arg2", Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[1]);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithNullArguments() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", "arg1", null, "arg3");
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals("arg1", Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[0]);
-        assertNull(Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[1]);
-        assertEquals("arg3", Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[2]);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithComponentArgument() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new DefaultJobStatusStore());
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals(String.class, Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[0].getClass());
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithStandaloneComponentArgument() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new StandaloneComponent());
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals(String.class, Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[0].getClass());
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithSerializableStandaloneComponentArgument() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new SerializableStandaloneComponent());
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", status.getLog().peek().getMessage());
-        assertEquals(SerializableStandaloneComponent.class, status.getLog().peek().getArgumentArray()[0].getClass());
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithCrossReference() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("message", new SerializableCrossReferenceObject());
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        SerializableCrossReferenceObject obj =
-            (SerializableCrossReferenceObject) status.getLog().peek().getArgumentArray()[0];
-        assertSame(obj, obj.field);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithComponentField() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new SerializableObjectTest(new DefaultJobStatusStore()));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertNull(((SerializableObjectTest) status.getLog().peek().getArgumentArray()[0]).field);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithStandaloneComponentField() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new SerializableObjectTest(new StandaloneComponent()));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertNull(((SerializableObjectTest) Objects.requireNonNull(
-            status.getLog().peek()).getArgumentArray()[0]).field);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithLoggerField() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new SerializableObjectTest(mock(Logger.class)));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertNull(((SerializableObjectTest) Objects.requireNonNull(
-            status.getLog().peek()).getArgumentArray()[0]).field);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithProviderField() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new SerializableObjectTest(mock(Provider.class)));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertNull(((SerializableObjectTest) Objects.requireNonNull(
-            status.getLog().peek()).getArgumentArray()[0]).field);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithComponentManagerField() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new SerializableObjectTest(mock(ComponentManager.class)));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertNull(((SerializableObjectTest) Objects.requireNonNull(
-            status.getLog().peek()).getArgumentArray()[0]).field);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithSerializableProviderField() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new SerializableObjectTest(new SerializableProvider()));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals(SerializableProvider.class,
-            ((SerializableObjectTest) Objects.requireNonNull(
-                status.getLog().peek()).getArgumentArray()[0]).field.getClass());
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithSerializableImplementationProviderField() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message",
-            new SerializableObjectTest(new SerializableImplementationProvider()));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals(SerializableImplementationProvider.class,
-            ((SerializableObjectTest) Objects.requireNonNull(
-                status.getLog().peek()).getArgumentArray()[0]).field.getClass());
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithCustomObjectArgument() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new CustomSerializableObject("value"));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals(new CustomSerializableObject("value"),
-            Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[0]);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithSerializableCustomObjectArgument() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new SerializableCustomObject("value"));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals(new SerializableCustomObject("value"),
-            Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[0]);
-    }
-
-    @Test
-    void serializeUnserializeWhenLogWithNotSerializableCustomObjectArgument() throws Exception
-    {
-        DefaultJobStatus<Request> status = createStatus();
-
-        status.getLoggerTail().error("error message", new NotSerializableCustomObject("value"));
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals("value", Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[0]);
-    }
-
-    @Test
-    void serializeUnserializeWithLogQueue() throws Exception
-    {
-        JobStatus status = createStatus(false);
-
-        status.getLog().error("error message", "arg1", "arg2");
-
-        status = storeGet(status);
-
-        assertNotNull(status.getLog());
-        assertEquals("error message", Objects.requireNonNull(status.getLog().peek()).getMessage());
-        assertEquals("arg1", Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[0]);
-        assertEquals("arg2", Objects.requireNonNull(status.getLog().peek()).getArgumentArray()[1]);
-    }
-
-    @Test
-    void createLoggerTailWithNullId()
-    {
-        assertNotNull(this.store.createLoggerTail(null, true));
+        LoggerTail loggerTail = mock();
+        when(this.persistentJobStatusStore.createLoggerTail(ID, readonly)).thenReturn(loggerTail);
+
+        try (LoggerTail actual = this.store.createLoggerTail(ID, readonly)) {
+            assertSame(loggerTail, actual);
+        }
+
+        verify(this.persistentJobStatusStore).createLoggerTail(ID, readonly);
+        verifyNoMoreInteractions(this.persistentJobStatusStore);
     }
 }

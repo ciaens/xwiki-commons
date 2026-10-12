@@ -22,6 +22,7 @@ package org.xwiki.job;
 import java.io.File;
 
 import org.xwiki.component.annotation.Role;
+import org.xwiki.stability.Unstable;
 
 /**
  * Some job manager related configuration.
@@ -42,6 +43,17 @@ public interface JobManagerConfiguration
      * @since 7.2M2
      */
     int getJobStatusCacheSize();
+
+    /**
+     * @return the number of seconds during which the status of a job stored by another cluster member (or the absence
+     * of such a status) is kept in cache, {@code 0} or less to read it again on every request
+     * @since 18.9.0RC1
+     */
+    @Unstable
+    default int getJobStatusRemoteCacheLifespan()
+    {
+        return 10;
+    }
 
     /**
      * @return the number of {@link GroupedJobInitializer} to keep in cache.

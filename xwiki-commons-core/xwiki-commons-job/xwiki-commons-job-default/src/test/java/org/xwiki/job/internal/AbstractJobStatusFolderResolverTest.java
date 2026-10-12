@@ -30,6 +30,8 @@ import org.xwiki.job.JobException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * Tests for the protection against job ids escaping the storage folder implemented in
@@ -47,16 +49,16 @@ class AbstractJobStatusFolderResolverTest
      */
     private static final class RawJobStatusFolderResolver extends AbstractJobStatusFolderResolver
     {
-        @Override
-        protected File getBaseFolder()
+        RawJobStatusFolderResolver()
         {
-            return BASE_FOLDER;
+            this.configuration = mock();
+            when(this.configuration.getStorage()).thenReturn(BASE_FOLDER);
         }
 
         @Override
-        protected File addIDElement(String idElement, File folder)
+        protected List<String> encodeAndSplit(String idElement)
         {
-            return new File(folder, idElement);
+            return List.of(idElement);
         }
     }
 

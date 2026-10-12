@@ -62,10 +62,23 @@ class S3BlobStoreIT extends AbstractBlobStoreIT
         // Set multipart sizes to 5MB to reduce storage requirements
         props.setMultipartUploadPartSize(5L * 1024 * 1024);
         props.setMultipartCopyPartSize(5L * 1024 * 1024);
+        configure(props);
 
         // Get the factory from the component manager as we cannot inject it directly because the S3 configuration is
         // initialized too late. Injecting a provider isn't supported by the test framework.
         BlobStoreFactory factory = this.componentManager.getInstance(BlobStoreFactory.class, "s3");
         return factory.create(name, props);
+    }
+
+    /**
+     * Configure the conditional requests of the store under test. By default, they are taken from the container,
+     * which reads them from the system properties.
+     *
+     * @param props the properties of the store under test
+     */
+    protected void configure(S3BlobStoreProperties props)
+    {
+        props.setConditionalWrites(this.container.conditionalWrites());
+        props.setConditionalCopies(this.container.conditionalCopies());
     }
 }

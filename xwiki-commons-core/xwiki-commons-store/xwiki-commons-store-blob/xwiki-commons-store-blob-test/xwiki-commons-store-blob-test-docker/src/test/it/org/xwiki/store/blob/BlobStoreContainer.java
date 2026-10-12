@@ -28,10 +28,14 @@ package org.xwiki.store.blob;
  * @param secretKey the secret key
  * @param region the AWS region
  * @param pathStyleAccess whether to use path style access
+ * @param conditionalWrites whether the service supports the condition of uploads (see
+ *     {@link S3BlobStoreProperties#isConditionalWrites()})
+ * @param conditionalCopies whether the service supports the conditions of copies (see
+ *     {@link S3BlobStoreProperties#isConditionalCopies()})
  * @version $Id$
  * @since 17.10.0RC1
  */
 public record BlobStoreContainer(String endpoint, String bucketName, String accessKey, String secretKey, String region,
-                                 boolean pathStyleAccess)
+                                 boolean pathStyleAccess, boolean conditionalWrites, boolean conditionalCopies)
 {
 }

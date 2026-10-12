@@ -524,4 +524,22 @@ class S3BlobStoreTest
     {
         assertEquals(STORE_NAME, this.store.getName());
     }
+
+    @ParameterizedTest
+    @CsvSource({
+        "true, true",
+        "true, false",
+        "false, true",
+        "false, false"
+    })
+    void conditionalRequestSettingsComeFromProperties(boolean conditionalWrites, boolean conditionalCopies)
+    {
+        S3BlobStoreProperties props = getS3BlobStoreProperties(BUCKET_NAME, KEY_PREFIX);
+        props.setConditionalWrites(conditionalWrites);
+        props.setConditionalCopies(conditionalCopies);
+        this.store.initialize(STORE_NAME, props);
+
+        assertEquals(conditionalWrites, this.store.isConditionalWrites());
+        assertEquals(conditionalCopies, this.store.isConditionalCopies());
+    }
 }

@@ -22,6 +22,8 @@ package org.xwiki.store.blob;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -34,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -122,6 +125,31 @@ abstract class AbstractBlobStoreIT
 
         BlobStoreTestUtils.writeBlob(store, path, data);
         assertTrue(blob.exists());
+    }
+
+    @Test
+    void lastModified() throws Exception
+    {
+        BlobStore store = getOrCreateBlobStore("testLastModified");
+        BlobPath path = BlobPath.absolute("dated.dat");
+        Blob blob = store.getBlob(path);
+
+        assertNull(blob.getLastModified());
+
+        // The store sets the date with a precision of one second (S3), from its own clock. The tests run the store on
+        // the same host (file system, Silo container), so the date is the time of the write, within a margin.
+        Instant before = Instant.now().truncatedTo(ChronoUnit.SECONDS).minusSeconds(5);
+        BlobStoreTestUtils.writeBlob(store, path, BlobStoreTestUtils.createTestData(100));
+        Instant after = Instant.now().plusSeconds(5);
+
+        Instant lastModified = blob.getLastModified();
+        assertNotNull(lastModified);
+        assertTrue(!lastModified.isBefore(before) && !lastModified.isAfter(after),
+            "Unexpected last modification date: " + lastModified);
+        assertEquals(lastModified, store.getBlob(path).getLastModified());
+
+        store.deleteBlob(path);
+        assertNull(blob.getLastModified());
     }
 
     @Test

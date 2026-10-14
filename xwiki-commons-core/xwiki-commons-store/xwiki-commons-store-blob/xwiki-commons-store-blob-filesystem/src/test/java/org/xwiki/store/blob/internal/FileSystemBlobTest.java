@@ -29,6 +29,8 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Instant;
 
 import org.apache.commons.io.IOUtils;
 import org.junit.jupiter.api.BeforeEach;
@@ -52,6 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -133,6 +136,34 @@ class FileSystemBlobTest
 
             BlobStoreException exception = assertThrows(BlobStoreException.class, () -> this.blob.getSize());
             assertEquals("Error getting file size.", exception.getMessage());
+            assertInstanceOf(IOException.class, exception.getCause());
+        }
+    }
+
+    @Test
+    void getLastModifiedWhenFileExists() throws Exception
+    {
+        Files.write(this.absolutePath, new byte[16]);
+        Instant lastModified = Instant.parse("2026-10-14T10:15:30Z");
+        Files.setLastModifiedTime(this.absolutePath, FileTime.from(lastModified));
+
+        assertEquals(lastModified, this.blob.getLastModified());
+    }
+
+    @Test
+    void getLastModifiedWhenFileDoesNotExist() throws Exception
+    {
+        assertNull(this.blob.getLastModified());
+    }
+
+    @Test
+    void getLastModifiedThrowsExceptionOnIOError()
+    {
+        try (MockedStatic<Files> filesMock = mockStatic(Files.class)) {
+            filesMock.when(() -> Files.getLastModifiedTime(this.absolutePath)).thenThrow(new IOException("IO Error"));
+
+            BlobStoreException exception = assertThrows(BlobStoreException.class, () -> this.blob.getLastModified());
+            assertEquals("Error getting the last modification date of the file.", exception.getMessage());
             assertInstanceOf(IOException.class, exception.getCause());
         }
     }

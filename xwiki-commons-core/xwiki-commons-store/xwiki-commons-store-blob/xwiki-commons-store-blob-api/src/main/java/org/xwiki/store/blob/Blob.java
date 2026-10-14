@@ -21,6 +21,7 @@ package org.xwiki.store.blob;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.time.Instant;
 
 import org.xwiki.stability.Unstable;
 import org.xwiki.store.StreamProvider;
@@ -57,6 +58,23 @@ public interface Blob extends StreamProvider
      * @throws BlobStoreException when the size cannot be determined
      */
     long getSize() throws BlobStoreException;
+
+    /**
+     * Get the date of the last write of this blob, as recorded by the store rather than by the code that wrote it. Its
+     * precision depends on the store, so it is not meant to order two writes made close to each other. Since it comes
+     * from the store, the age of a blob computed from it doesn't depend on a difference between the clocks of the
+     * cluster member that wrote the blob and the one that reads it.
+     *
+     * @return the date of the last write of this blob, or {@code null} if the blob doesn't exist
+     * @throws BlobStoreException when the date cannot be determined, or when the store doesn't provide it
+     * @since 18.10.0RC1
+     */
+    @Unstable
+    default Instant getLastModified() throws BlobStoreException
+    {
+        throw new BlobStoreException("The blob store [%s] doesn't provide the last modification date of its blobs."
+            .formatted(getStore().getType()));
+    }
 
     /**
      * Get an OutputStream to write data to this blob. The caller must close the returned stream after use.

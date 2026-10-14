@@ -21,6 +21,7 @@ package org.xwiki.store.blob.internal;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.time.Instant;
 import java.util.OptionalLong;
 import java.util.Set;
 
@@ -111,6 +112,27 @@ public class S3Blob extends AbstractBlob<S3BlobStore>
             return -1;
         } catch (Exception e) {
             throw new BlobStoreException("Failed to get size for blob: %s".formatted(getPath()), e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>This is the {@code Last-Modified} date returned by a HeadObject request: the time of the S3 service when the
+     * object was uploaded, with a precision of one second.</p>
+     *
+     * @since 18.10.0RC1
+     */
+    @Override
+    public Instant getLastModified() throws BlobStoreException
+    {
+        try {
+            return getHeadObject().lastModified();
+        } catch (NoSuchKeyException e) {
+            return null;
+        } catch (Exception e) {
+            throw new BlobStoreException(
+                "Failed to get the last modification date of the blob [%s]".formatted(getPath()), e);
         }
     }
 

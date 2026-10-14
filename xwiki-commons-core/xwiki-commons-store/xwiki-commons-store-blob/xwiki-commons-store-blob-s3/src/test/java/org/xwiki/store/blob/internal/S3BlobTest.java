@@ -21,6 +21,7 @@ package org.xwiki.store.blob.internal;
 
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.time.Instant;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -156,6 +157,37 @@ class S3BlobTest
             .thenThrow(S3Exception.builder().message("error").statusCode(500).build());
 
         assertThrows(BlobStoreException.class, () -> this.blob.getSize());
+    }
+
+    @Test
+    void getLastModifiedWhenPresent() throws BlobStoreException
+    {
+        Instant lastModified = Instant.parse("2026-10-14T10:15:30Z");
+        HeadObjectResponse response = HeadObjectResponse.builder().lastModified(lastModified).build();
+        when(this.s3Client.headObject(any(HeadObjectRequest.class))).thenReturn(response);
+
+        assertEquals(lastModified, this.blob.getLastModified());
+    }
+
+    @Test
+    void getLastModifiedWhenMissing() throws BlobStoreException
+    {
+        when(this.s3Client.headObject(any(HeadObjectRequest.class)))
+            .thenThrow(NoSuchKeyException.builder().message("missing").build());
+
+        assertNull(this.blob.getLastModified());
+    }
+
+    @Test
+    void getLastModifiedWhenS3Exception()
+    {
+        S3Exception exception = (S3Exception) S3Exception.builder().message("error").statusCode(500).build();
+        when(this.s3Client.headObject(any(HeadObjectRequest.class))).thenThrow(exception);
+
+        BlobStoreException thrown = assertThrows(BlobStoreException.class, () -> this.blob.getLastModified());
+
+        assertEquals("Failed to get the last modification date of the blob [/my/blob.txt]", thrown.getMessage());
+        assertSame(exception, thrown.getCause());
     }
 
     @Test

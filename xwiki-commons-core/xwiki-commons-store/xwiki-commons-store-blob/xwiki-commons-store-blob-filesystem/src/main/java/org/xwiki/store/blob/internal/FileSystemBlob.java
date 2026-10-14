@@ -30,6 +30,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.Instant;
 import java.util.OptionalLong;
 import java.util.Set;
 
@@ -91,6 +92,26 @@ public class FileSystemBlob extends AbstractBlob<FileSystemBlobStore>
                 : -1;
         } catch (IOException e) {
             throw new BlobStoreException("Error getting file size.", e);
+        }
+    }
+
+    /**
+     * {@inheritDoc}
+     *
+     * <p>This is the modification time of the file, set by the file system. Like {@link #getSize()}, it follows a
+     * symbolic link and returns the modification time of its target.</p>
+     *
+     * @since 18.10.0RC1
+     */
+    @Override
+    public Instant getLastModified() throws BlobStoreException
+    {
+        try {
+            return Files.getLastModifiedTime(this.absolutePath).toInstant();
+        } catch (NoSuchFileException e) {
+            return null;
+        } catch (IOException e) {
+            throw new BlobStoreException("Error getting the last modification date of the file.", e);
         }
     }
 

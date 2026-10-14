@@ -119,6 +119,8 @@ class CrossStoreBlobStoreIT
         s3Props.setKeyPrefix("crossstore");
         s3Props.setMultipartUploadPartSize(5L * 1024 * 1024);
         s3Props.setMultipartCopyPartSize(5L * 1024 * 1024);
+        s3Props.setConditionalWrites(this.container.conditionalWrites());
+        s3Props.setConditionalCopies(this.container.conditionalCopies());
 
         // Get the factory from the component manager as we cannot inject it directly because the S3 configuration is
         // initialized too late. Injecting a provider isn't supported by the test framework.

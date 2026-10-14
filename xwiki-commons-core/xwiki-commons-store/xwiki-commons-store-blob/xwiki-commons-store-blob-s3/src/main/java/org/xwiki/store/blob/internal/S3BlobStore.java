@@ -178,6 +178,26 @@ public class S3BlobStore extends AbstractBlobStore<S3BlobStoreProperties>
         return getProperties().getMultipartCopyPartSize();
     }
 
+    /**
+     * @return {@code true} if the S3 service supports the condition of uploads, see
+     *     {@link S3BlobStoreProperties#isConditionalWrites()}
+     * @since 18.10.0RC1
+     */
+    public boolean isConditionalWrites()
+    {
+        return getProperties().isConditionalWrites();
+    }
+
+    /**
+     * @return {@code true} if the S3 service supports the conditions of copies, see
+     *     {@link S3BlobStoreProperties#isConditionalCopies()}
+     * @since 18.10.0RC1
+     */
+    public boolean isConditionalCopies()
+    {
+        return getProperties().isConditionalCopies();
+    }
+
     @Override
     public boolean equals(Object o)
     {

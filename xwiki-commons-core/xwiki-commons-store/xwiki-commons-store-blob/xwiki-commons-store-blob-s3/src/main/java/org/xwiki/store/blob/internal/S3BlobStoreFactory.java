@@ -89,6 +89,8 @@ public class S3BlobStoreFactory implements BlobStoreFactory<S3BlobStorePropertie
         builder.set(S3BlobStoreProperties.MULTIPART_UPLOAD_PART_SIZE,
             this.configuration.getS3MultipartPartUploadSizeBytes());
         builder.set(S3BlobStoreProperties.MULTIPART_COPY_PART_SIZE, this.configuration.getS3MultipartCopySizeBytes());
+        builder.set(S3BlobStoreProperties.CONDITIONAL_WRITES, this.configuration.isS3ConditionalWrites());
+        builder.set(S3BlobStoreProperties.CONDITIONAL_COPIES, this.configuration.isS3ConditionalCopies());
 
         return builder;
     }

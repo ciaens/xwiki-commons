@@ -59,6 +59,24 @@ public class S3BlobStoreProperties implements BlobStoreProperties
     public static final String MULTIPART_COPY_PART_SIZE = "s3.copyPartSizeBytes";
 
     /**
+     * The property ID indicating whether the S3 service supports the condition of uploads: {@code If-None-Match} on
+     * {@code PutObject} and {@code CompleteMultipartUpload}.
+     *
+     * @since 18.10.0RC1
+     */
+    @Unstable
+    public static final String CONDITIONAL_WRITES = "s3.conditionalWrites";
+
+    /**
+     * The property ID indicating whether the S3 service supports the conditions of copies: {@code If-None-Match} on
+     * {@code CopyObject} and {@code x-amz-copy-source-if-match} on {@code UploadPartCopy}.
+     *
+     * @since 18.10.0RC1
+     */
+    @Unstable
+    public static final String CONDITIONAL_COPIES = "s3.conditionalCopies";
+
+    /**
      * The minimum part size for S3 multipart uploads (5 MiB).
      */
     private static final long MIN_PART_SIZE = 5L * 1024 * 1024;
@@ -92,6 +110,16 @@ public class S3BlobStoreProperties implements BlobStoreProperties
     @Min(MIN_PART_SIZE)
     @Max(MAX_PART_SIZE)
     private long multipartCopyPartSize;
+
+    /**
+     * Whether to send the condition of uploads.
+     */
+    private boolean conditionalWrites = true;
+
+    /**
+     * Whether to send the conditions of copies.
+     */
+    private boolean conditionalCopies = true;
 
     /**
      * Gets the S3 bucket name.
@@ -176,5 +204,69 @@ public class S3BlobStoreProperties implements BlobStoreProperties
     public void setMultipartCopyPartSize(long multipartCopyPartSize)
     {
         this.multipartCopyPartSize = multipartCopyPartSize;
+    }
+
+    /**
+     * Indicates whether the S3 service supports the condition sent with uploads: {@code If-None-Match: *} on
+     * {@code PutObject} and {@code CompleteMultipartUpload} (also used to complete multipart copies), which creates a
+     * blob only if it does not exist yet ({@link BlobWriteMode#CREATE_NEW}). When disabled, the store relies on its
+     * existence check alone, which is not atomic.
+     *
+     * @return {@code true} if the conditions are sent (the default), {@code false} otherwise
+     * @since 18.10.0RC1
+     */
+    @Unstable
+    public boolean isConditionalWrites()
+    {
+        return this.conditionalWrites;
+    }
+
+    /**
+     * Sets whether the S3 service supports the condition sent with uploads.
+     *
+     * @param conditionalWrites {@code true} to send the conditions, {@code false} for services that do not support
+     *     them
+     * @see #isConditionalWrites()
+     * @since 18.10.0RC1
+     */
+    @Unstable
+    @PropertyId(CONDITIONAL_WRITES)
+    public void setConditionalWrites(boolean conditionalWrites)
+    {
+        this.conditionalWrites = conditionalWrites;
+    }
+
+    /**
+     * Indicates whether the S3 service supports the conditions sent with copies: {@code If-None-Match: *} on
+     * {@code CopyObject} (blobs up to the multipart copy part size), which creates the target only if it does not
+     * exist yet ({@link BlobWriteMode#CREATE_NEW}), and {@code x-amz-copy-source-if-match} on {@code UploadPartCopy}
+     * (larger blobs), which makes sure that all parts are copied from the same version of the source. Some services
+     * support the condition of uploads but reject or misjudge the conditions of copies. When disabled, copies up to the
+     * multipart copy part size rely on the existence check of the target alone, which is not atomic (larger copies
+     * complete with the condition of uploads, see {@link #isConditionalWrites()}), and the source of a multipart copy
+     * is checked again before completing it.
+     *
+     * @return {@code true} if the conditions are sent (the default), {@code false} otherwise
+     * @since 18.10.0RC1
+     */
+    @Unstable
+    public boolean isConditionalCopies()
+    {
+        return this.conditionalCopies;
+    }
+
+    /**
+     * Sets whether the S3 service supports the conditions sent with copies.
+     *
+     * @param conditionalCopies {@code true} to send the conditions, {@code false} for services that do not support
+     *     them
+     * @see #isConditionalCopies()
+     * @since 18.10.0RC1
+     */
+    @Unstable
+    @PropertyId(CONDITIONAL_COPIES)
+    public void setConditionalCopies(boolean conditionalCopies)
+    {
+        this.conditionalCopies = conditionalCopies;
     }
 }

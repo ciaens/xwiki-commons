@@ -127,6 +127,8 @@ class S3BlobStoreFactoryTest
         when(this.configuration.getS3KeyPrefix()).thenReturn(PREFIX);
         when(this.configuration.getS3MultipartPartUploadSizeBytes()).thenReturn(VALID_MULTIPART_UPLOAD_SIZE);
         when(this.configuration.getS3MultipartCopySizeBytes()).thenReturn(VALID_MULTIPART_COPY_SIZE);
+        when(this.configuration.isS3ConditionalWrites()).thenReturn(false);
+        when(this.configuration.isS3ConditionalCopies()).thenReturn(true);
 
         BlobStorePropertiesBuilder builder = this.factory.newPropertiesBuilder(NAME);
 
@@ -139,6 +141,8 @@ class S3BlobStoreFactoryTest
             builder.get(S3BlobStoreProperties.MULTIPART_UPLOAD_PART_SIZE).orElse(null));
         assertEquals(VALID_MULTIPART_COPY_SIZE,
             builder.get(S3BlobStoreProperties.MULTIPART_COPY_PART_SIZE).orElse(null));
+        assertEquals(false, builder.get(S3BlobStoreProperties.CONDITIONAL_WRITES).orElse(null));
+        assertEquals(true, builder.get(S3BlobStoreProperties.CONDITIONAL_COPIES).orElse(null));
     }
 
     @ParameterizedTest

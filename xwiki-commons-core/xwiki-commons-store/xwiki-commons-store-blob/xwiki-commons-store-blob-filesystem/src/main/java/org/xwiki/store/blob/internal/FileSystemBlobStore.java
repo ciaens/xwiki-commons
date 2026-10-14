@@ -26,8 +26,6 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.stream.Stream;
@@ -45,6 +43,7 @@ import org.xwiki.store.blob.BlobStore;
 import org.xwiki.store.blob.BlobStoreException;
 import org.xwiki.store.blob.BlobWriteMode;
 import org.xwiki.store.blob.FileSystemBlobStoreProperties;
+import org.xwiki.store.blob.UncheckedBlobStoreException;
 
 /**
  * A {@link BlobStore} implementation that stores blobs in the file system.
@@ -114,34 +113,9 @@ public class FileSystemBlobStore extends AbstractBlobStore<FileSystemBlobStorePr
         if (!Files.exists(absolutePath) || !Files.isDirectory(absolutePath)) {
             return Stream.empty();
         } else {
-            // List files recursively, ignoring directories.
-            try {
-                Path normalizedAbsolutePath = absolutePath.normalize();
-                // The caller is responsible for closing the stream.
-                //noinspection resource
-                return Files.walk(normalizedAbsolutePath)
-                    .filter(Files::isRegularFile)
-                    .map(p -> toBlobFromAbsolute(p.normalize(), normalizedAbsolutePath, path));
-            } catch (IOException e) {
-                throw new BlobStoreException("Failed to list blobs in directory: " + absolutePath, e);
-            }
+            // List files recursively, ignoring directories. The caller is responsible for closing the stream.
+            return FileSystemBlobIterator.stream(this, absolutePath.normalize(), path);
         }
-    }
-
-    private Blob toBlobFromAbsolute(Path normalizedPath, Path normalizedAbsolutePath, BlobPath basePath)
-    {
-        if (!normalizedPath.startsWith(normalizedAbsolutePath)) {
-            throw new IllegalStateException("Found a file outside the expected directory: " + normalizedPath);
-        }
-
-        Path relativePath = normalizedAbsolutePath.relativize(normalizedPath);
-
-        List<String> segments = new ArrayList<>(basePath.getNames());
-        for (Path segment : relativePath) {
-            segments.add(segment.toString());
-        }
-
-        return new FileSystemBlob(BlobPath.absolute(segments), normalizedPath, this);
     }
 
     @Override
@@ -222,6 +196,8 @@ public class FileSystemBlobStore extends AbstractBlobStore<FileSystemBlobStorePr
     {
         try (Stream<Blob> stream = listDescendants(path)) {
             return stream.findFirst().isPresent();
+        } catch (UncheckedBlobStoreException e) {
+            throw new BlobStoreException("Failed to check if the given prefix has descendants: " + path, e.getCause());
         }
     }
 

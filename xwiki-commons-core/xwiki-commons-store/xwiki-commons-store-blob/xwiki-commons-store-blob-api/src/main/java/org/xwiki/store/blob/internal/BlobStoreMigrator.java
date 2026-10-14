@@ -37,6 +37,7 @@ import org.xwiki.store.blob.BlobPath;
 import org.xwiki.store.blob.BlobStore;
 import org.xwiki.store.blob.BlobStoreException;
 import org.xwiki.store.blob.BlobWriteMode;
+import org.xwiki.store.blob.UncheckedBlobStoreException;
 
 /**
  * Migrates blobs from one {@link BlobStore} to another.
@@ -133,8 +134,10 @@ public class BlobStoreMigrator
         } catch (BlobStoreException e) {
             throw e;
         } catch (Exception e) {
+            // A listing failure is thrown by the stream as an UncheckedBlobStoreException: keep only its cause.
+            Throwable cause = e instanceof UncheckedBlobStoreException unchecked ? unchecked.getCause() : e;
             throw new BlobStoreException("Failed to list blobs from migration store [%s] during migration of [%s]"
-                .formatted(sourceStore.getType(), storeName), e);
+                .formatted(sourceStore.getType(), storeName), cause);
         }
     }
 

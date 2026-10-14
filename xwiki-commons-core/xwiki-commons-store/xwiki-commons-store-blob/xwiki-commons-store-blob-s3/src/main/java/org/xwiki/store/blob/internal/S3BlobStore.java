@@ -38,6 +38,7 @@ import org.xwiki.store.blob.BlobPath;
 import org.xwiki.store.blob.BlobStore;
 import org.xwiki.store.blob.BlobStoreException;
 import org.xwiki.store.blob.S3BlobStoreProperties;
+import org.xwiki.store.blob.UncheckedBlobStoreException;
 
 /**
  * S3-based blob store implementation.
@@ -130,9 +131,10 @@ public class S3BlobStore extends AbstractBlobStore<S3BlobStoreProperties>
             return new S3BlobIterator(this.keyMapper.getS3KeyPrefix(path), this.bucketName, 1,
                 this.clientManager.getS3Client(), this).hasNext();
         } catch (Exception e) {
-            // The code doesn't throw any checked exceptions as the iterator cannot throw them, but we catch any
-            // runtime exceptions to make them nicer to handle for the caller
-            throw new BlobStoreException("Failed to check if the given prefix has descendants: " + path, e);
+            // The iterator cannot throw checked exceptions: unwrap the BlobStoreException of a failed request and
+            // wrap any other runtime exception to make them nicer to handle for the caller.
+            Throwable cause = e instanceof UncheckedBlobStoreException unchecked ? unchecked.getCause() : e;
+            throw new BlobStoreException("Failed to check if the given prefix has descendants: " + path, cause);
         }
     }
 
@@ -147,6 +149,9 @@ public class S3BlobStore extends AbstractBlobStore<S3BlobStoreProperties>
     {
         try (Stream<Blob> blobs = listDescendants(path)) {
             this.deleteOperations.deleteBlobs(this, blobs);
+        } catch (UncheckedBlobStoreException e) {
+            throw new BlobStoreException("Failed to list the blobs to delete under [%s]".formatted(path),
+                e.getCause());
         }
     }
 

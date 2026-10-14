@@ -60,9 +60,13 @@ public interface BlobStore
      * List all descendant blobs under the given path prefix. The returned stream includes blobs at every depth below
      * the provided path. The caller must close the returned stream after use.
      *
+     * <p>The blobs are fetched lazily while the stream is consumed. A failure at that time is thrown by the stream
+     * operation as an {@link UncheckedBlobStoreException} whose cause is the {@link BlobStoreException} describing
+     * it.</p>
+     *
      * @param path the path prefix to search under
      * @return a stream of the blobs under the given path
-     * @throws BlobStoreException if the listing operation fails
+     * @throws BlobStoreException if the listing operation fails before the stream is returned
      */
     Stream<Blob> listDescendants(BlobPath path) throws BlobStoreException;
 
@@ -138,7 +142,7 @@ public interface BlobStore
      * Delete all descendant blobs under the given path prefix.
      *
      * @param path the path prefix to delete under
-     * @throws BlobStoreException if the deletion fails
+     * @throws BlobStoreException if the deletion fails, including when listing the blobs to delete fails
      */
     void deleteDescendants(BlobPath path) throws BlobStoreException;
 
@@ -150,7 +154,7 @@ public interface BlobStore
      *
      * @param path the path of the directory to check
      * @return true if at least one descendant blob exists, false otherwise
-     * @throws BlobStoreException if the check operation fails
+     * @throws BlobStoreException if the check operation fails, including when listing the descendants fails
      */
     boolean hasDescendants(BlobPath path) throws BlobStoreException;
 }

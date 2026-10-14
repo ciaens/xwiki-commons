@@ -35,6 +35,7 @@ import org.xwiki.store.blob.BlobPath;
 import org.xwiki.store.blob.BlobStore;
 import org.xwiki.store.blob.BlobStoreException;
 import org.xwiki.store.blob.BlobWriteMode;
+import org.xwiki.store.blob.UncheckedBlobStoreException;
 import org.xwiki.test.LogLevel;
 import org.xwiki.test.junit5.LogCaptureExtension;
 import org.xwiki.test.junit5.mockito.ComponentTest;
@@ -44,6 +45,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -146,6 +148,26 @@ class BlobStoreMigratorTest
         assertThat(exception.getMessage(), containsString("from [filesystem] to [s3]"));
         verify(this.targetStore, never()).deleteBlob(MARKER_PATH);
 
+        assertEquals(
+            "Starting blob store migration for [testStore] (source: [filesystem], target: [s3]).",
+            this.logCapture.getMessage(0));
+    }
+
+    @Test
+    void migrateUnwrapsListingFailure() throws Exception
+    {
+        BlobStoreException listingFailure = new BlobStoreException("listing failed");
+        when(this.sourceStore.listDescendants(BlobPath.root())).thenReturn(Stream.generate(() -> {
+            throw new UncheckedBlobStoreException(listingFailure);
+        }));
+
+        BlobStoreException exception = assertThrows(BlobStoreException.class,
+            () -> this.migrator.migrate(this.targetStore, this.sourceStore));
+
+        assertEquals("Failed to list blobs from migration store [filesystem] during migration of [testStore]",
+            exception.getMessage());
+        assertSame(listingFailure, exception.getCause());
+        verify(this.targetStore, never()).deleteBlob(MARKER_PATH);
         assertEquals(
             "Starting blob store migration for [testStore] (source: [filesystem], target: [s3]).",
             this.logCapture.getMessage(0));

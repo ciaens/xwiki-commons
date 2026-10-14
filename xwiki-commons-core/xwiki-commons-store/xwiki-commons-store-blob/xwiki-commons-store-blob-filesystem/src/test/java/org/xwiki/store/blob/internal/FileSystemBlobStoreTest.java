@@ -22,6 +22,7 @@ package org.xwiki.store.blob.internal;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -45,6 +46,7 @@ import org.xwiki.store.blob.BlobStore;
 import org.xwiki.store.blob.BlobStoreException;
 import org.xwiki.store.blob.BlobWriteMode;
 import org.xwiki.store.blob.FileSystemBlobStoreProperties;
+import org.xwiki.store.blob.UncheckedBlobStoreException;
 import org.xwiki.test.junit5.XWikiTempDir;
 import org.xwiki.test.junit5.XWikiTempDirExtension;
 
@@ -58,6 +60,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -182,6 +185,33 @@ class FileSystemBlobStoreTest extends XWikiTempDirExtension
                 .sorted()
                 .toList();
             assertEquals(List.of("/testdir/file1.txt", "/testdir/file2.txt", "/testdir/subdir/file3.txt"), filenames);
+        }
+    }
+
+    @Test
+    void listDescendantsWrapsWalkFailure() throws IOException, BlobStoreException
+    {
+        Path directory = this.basePath.resolve("dir");
+        Files.createDirectories(directory);
+        BlobPath blobPath = BlobPath.absolute("dir");
+        IOException failure = new IOException("Simulated I/O error");
+
+        try (MockedStatic<Files> filesMock = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            filesMock.when(() -> Files.walk(any(Path.class))).thenAnswer(invocation -> Stream.<Path>generate(() -> {
+                throw new UncheckedIOException(failure);
+            }));
+
+            try (Stream<Blob> blobs = this.blobStore.listDescendants(blobPath)) {
+                UncheckedBlobStoreException thrown = assertThrows(UncheckedBlobStoreException.class, blobs::toList);
+
+                assertEquals("Failed to list blobs in directory: " + directory, thrown.getCause().getMessage());
+                assertSame(failure, thrown.getCause().getCause());
+            }
+
+            BlobStoreException thrown =
+                assertThrows(BlobStoreException.class, () -> this.blobStore.hasDescendants(blobPath));
+            assertEquals("Failed to check if the given prefix has descendants: /dir", thrown.getMessage());
+            assertSame(failure, thrown.getCause().getCause());
         }
     }
 

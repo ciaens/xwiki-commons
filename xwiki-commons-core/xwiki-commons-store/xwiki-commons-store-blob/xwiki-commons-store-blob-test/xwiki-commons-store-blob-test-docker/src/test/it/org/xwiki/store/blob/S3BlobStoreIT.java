@@ -19,6 +19,10 @@
  */
 package org.xwiki.store.blob;
 
+import java.util.UUID;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.xwiki.component.manager.ComponentManager;
 import org.xwiki.store.blob.internal.S3BlobStore;
@@ -29,6 +33,11 @@ import org.xwiki.store.blob.internal.S3DeleteOperations;
 import org.xwiki.test.annotation.ComponentList;
 import org.xwiki.test.junit5.mockito.ComponentTest;
 import org.xwiki.test.junit5.mockito.InjectComponentManager;
+
+import software.amazon.awssdk.core.exception.SdkException;
+
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * Integration tests for {@link S3BlobStore} using a Silo container.
@@ -52,6 +61,30 @@ class S3BlobStoreIT extends AbstractBlobStoreIT
 
     @InjectComponentManager
     private ComponentManager componentManager;
+
+    @Test
+    void listingFailuresAreBlobStoreExceptions() throws Exception
+    {
+        S3BlobStoreProperties props = new S3BlobStoreProperties();
+        // A random name, so that the bucket doesn't exist on an external endpoint either.
+        props.setBucket("missing-" + UUID.randomUUID());
+        props.setKeyPrefix("listingFailures");
+        // The factory checks that the bucket exists, create the store directly.
+        S3BlobStore store = this.componentManager.getInstance(S3BlobStore.class);
+        store.initialize("listingFailures", props);
+        BlobPath path = BlobPath.absolute("dir");
+
+        try (Stream<Blob> blobs = store.listDescendants(path)) {
+            UncheckedBlobStoreException exception = assertThrows(UncheckedBlobStoreException.class, blobs::toList);
+            assertInstanceOf(SdkException.class, exception.getCause().getCause());
+        }
+
+        BlobStoreException exception = assertThrows(BlobStoreException.class, () -> store.hasDescendants(path));
+        assertInstanceOf(SdkException.class, exception.getCause().getCause());
+
+        exception = assertThrows(BlobStoreException.class, () -> store.deleteDescendants(path));
+        assertInstanceOf(SdkException.class, exception.getCause().getCause());
+    }
 
     @Override
     protected BlobStore createBlobStore(String name) throws Exception

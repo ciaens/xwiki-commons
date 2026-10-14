@@ -31,8 +31,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.xwiki.store.blob.Blob;
 import org.xwiki.store.blob.BlobPath;
+import org.xwiki.store.blob.UncheckedBlobStoreException;
 
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
+import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
@@ -42,6 +44,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -311,7 +314,31 @@ class S3BlobIteratorTest
 
         when(this.s3Client.listObjectsV2(any(ListObjectsV2Request.class))).thenThrow(exception);
 
-        assertThrows(S3Exception.class, () -> this.iterator.hasNext());
+        UncheckedBlobStoreException thrown =
+            assertThrows(UncheckedBlobStoreException.class, () -> this.iterator.hasNext());
+
+        assertEquals("Failed to list the objects with the prefix [test/prefix/] in the bucket [test-bucket]",
+            thrown.getCause().getMessage());
+        assertSame(exception, thrown.getCause().getCause());
+    }
+
+    @Test
+    void clientExceptionDuringFetchOfNextPage()
+    {
+        ListObjectsV2Response response = ListObjectsV2Response.builder()
+            .contents(createS3Object("test/prefix/file1.txt"))
+            .isTruncated(true)
+            .nextContinuationToken("token1")
+            .build();
+        SdkClientException exception = SdkClientException.create("Connection reset");
+        when(this.s3Client.listObjectsV2(any(ListObjectsV2Request.class))).thenReturn(response).thenThrow(exception);
+        when(this.keyMapper.s3KeyToBlobPath("test/prefix/file1.txt")).thenReturn(mock());
+
+        assertNotNull(this.iterator.next());
+        UncheckedBlobStoreException thrown =
+            assertThrows(UncheckedBlobStoreException.class, () -> this.iterator.next());
+
+        assertSame(exception, thrown.getCause().getCause());
     }
 
     @Test

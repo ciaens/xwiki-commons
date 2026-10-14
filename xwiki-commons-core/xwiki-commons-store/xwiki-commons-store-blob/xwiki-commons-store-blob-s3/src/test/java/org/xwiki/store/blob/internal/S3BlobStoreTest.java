@@ -33,17 +33,22 @@ import org.xwiki.store.blob.BlobPath;
 import org.xwiki.store.blob.BlobStore;
 import org.xwiki.store.blob.BlobStoreException;
 import org.xwiki.store.blob.S3BlobStoreProperties;
+import org.xwiki.store.blob.UncheckedBlobStoreException;
 import org.xwiki.test.junit5.mockito.ComponentTest;
 import org.xwiki.test.junit5.mockito.InjectMockComponents;
 import org.xwiki.test.junit5.mockito.MockComponent;
 
+import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
+import software.amazon.awssdk.services.s3.model.S3Exception;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -393,6 +398,51 @@ class S3BlobStoreTest
             assertEquals(IllegalStateException.class, thrown.getCause().getClass());
             assertEquals(1, mockedIterator.constructed().size());
         }
+    }
+
+    @Test
+    void hasDescendantsUnwrapsListingFailure()
+    {
+        S3Exception exception = (S3Exception) S3Exception.builder().message("Access denied").statusCode(403).build();
+        when(this.s3Client.listObjectsV2(any(ListObjectsV2Request.class))).thenThrow(exception);
+
+        BlobStoreException thrown = assertThrows(BlobStoreException.class, () -> this.store.hasDescendants(BLOB_PATH));
+
+        assertEquals("Failed to check if the given prefix has descendants: /dir/file.txt", thrown.getMessage());
+        assertEquals(BlobStoreException.class, thrown.getCause().getClass());
+        assertSame(exception, thrown.getCause().getCause());
+    }
+
+    @Test
+    void listDescendantsThrowsUncheckedBlobStoreException()
+    {
+        S3Exception exception = (S3Exception) S3Exception.builder().message("Access denied").statusCode(403).build();
+        when(this.s3Client.listObjectsV2(any(ListObjectsV2Request.class))).thenThrow(exception);
+
+        try (Stream<Blob> blobs = this.store.listDescendants(BLOB_PATH)) {
+            UncheckedBlobStoreException thrown = assertThrows(UncheckedBlobStoreException.class, blobs::toList);
+
+            assertEquals("Failed to list the objects with the prefix [prefix/dir/file.txt/] in the bucket "
+                + "[test-bucket]", thrown.getCause().getMessage());
+            assertSame(exception, thrown.getCause().getCause());
+        }
+    }
+
+    @Test
+    void deleteDescendantsWrapsListingFailure() throws BlobStoreException
+    {
+        SdkClientException exception = SdkClientException.create("Connection reset");
+        when(this.s3Client.listObjectsV2(any(ListObjectsV2Request.class))).thenThrow(exception);
+        // Consume the stream like the real delete operations do.
+        doAnswer(invocation -> invocation.<Stream<Blob>>getArgument(1).toList())
+            .when(this.deleteOperations).deleteBlobs(eq(this.store), any());
+
+        BlobStoreException thrown =
+            assertThrows(BlobStoreException.class, () -> this.store.deleteDescendants(BLOB_PATH));
+
+        assertEquals("Failed to list the blobs to delete under [/dir/file.txt]", thrown.getMessage());
+        assertEquals(BlobStoreException.class, thrown.getCause().getClass());
+        assertSame(exception, thrown.getCause().getCause());
     }
 
     @Test

@@ -24,14 +24,18 @@ import java.util.NoSuchElementException;
 
 import org.xwiki.store.blob.Blob;
 import org.xwiki.store.blob.BlobPath;
+import org.xwiki.store.blob.BlobStoreException;
+import org.xwiki.store.blob.UncheckedBlobStoreException;
 
+import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
- * Iterator that fetches S3 objects page by page and converts them to Blob objects.
+ * Iterator that fetches S3 objects page by page and converts them to Blob objects. A failed request is thrown as an
+ * {@link UncheckedBlobStoreException}.
  *
  * @version $Id$
  * @since 17.10.0RC1
@@ -130,9 +134,15 @@ final class S3BlobIterator implements Iterator<Blob>
             requestBuilder.continuationToken(this.continuationToken);
         }
 
-        // This could throw an exception. As there aren't any checked exceptions on Iterator methods, we let it
-        // propagate as a runtime exception.
-        ListObjectsV2Response response = this.s3Client.listObjectsV2(requestBuilder.build());
+        ListObjectsV2Response response;
+        try {
+            response = this.s3Client.listObjectsV2(requestBuilder.build());
+        } catch (SdkException e) {
+            // Iterator methods cannot throw checked exceptions.
+            throw new UncheckedBlobStoreException(new BlobStoreException(
+                "Failed to list the objects with the prefix [%s] in the bucket [%s]".formatted(this.prefix,
+                    this.bucketName), e));
+        }
 
         this.currentPageIterator = response.contents().iterator();
         this.continuationToken = response.nextContinuationToken();

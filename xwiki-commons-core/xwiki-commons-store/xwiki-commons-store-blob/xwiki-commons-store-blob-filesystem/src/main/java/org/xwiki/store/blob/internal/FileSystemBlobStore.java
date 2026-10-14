@@ -109,13 +109,8 @@ public class FileSystemBlobStore extends AbstractBlobStore<FileSystemBlobStorePr
     @Override
     public Stream<Blob> listDescendants(BlobPath path) throws BlobStoreException
     {
-        Path absolutePath = getBlobFilePath(path);
-        if (!Files.exists(absolutePath) || !Files.isDirectory(absolutePath)) {
-            return Stream.empty();
-        } else {
-            // List files recursively, ignoring directories. The caller is responsible for closing the stream.
-            return FileSystemBlobIterator.stream(this, absolutePath.normalize(), path);
-        }
+        // List files recursively, ignoring directories. The caller is responsible for closing the stream.
+        return FileSystemBlobIterator.stream(this, getBlobFilePath(path).normalize(), path);
     }
 
     @Override
@@ -293,8 +288,8 @@ public class FileSystemBlobStore extends AbstractBlobStore<FileSystemBlobStorePr
     {
         try {
             Path absolutePath = getBlobFilePath(path);
-            if (Files.exists(absolutePath) && Files.isDirectory(absolutePath)) {
-                PathUtils.deleteDirectory(absolutePath);
+            if (Files.isDirectory(absolutePath)) {
+                DeletingFileVisitor.deleteTree(absolutePath);
                 cleanUpParents(absolutePath);
             }
         } catch (IOException e) {

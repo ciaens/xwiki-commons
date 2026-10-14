@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.stream.Stream;
 
@@ -355,6 +356,35 @@ abstract class AbstractBlobStoreIT
         try (Stream<Blob> blobs = store.listDescendants(dirPath)) {
             assertEquals(0, blobs.count());
         }
+    }
+
+    @Test
+    void listAndDeleteDescendantsWhileDeletedConcurrently() throws Exception
+    {
+        BlobStore store = getOrCreateBlobStore("testConcurrentDeletion");
+        byte[] data = BlobStoreTestUtils.createTestData(100);
+        BlobPath dirPath = BlobPath.absolute("concurrentDir");
+        for (String name : List.of("a", "b")) {
+            BlobStoreTestUtils.writeBlob(store, BlobPath.absolute("concurrentDir", name, "file1.dat"), data);
+            BlobStoreTestUtils.writeBlob(store, BlobPath.absolute("concurrentDir", name, "file2.dat"), data);
+            BlobStoreTestUtils.writeBlob(store, BlobPath.absolute("concurrentDir", name, "sub", "file3.dat"), data);
+        }
+
+        try (Stream<Blob> blobs = store.listDescendants(dirPath)) {
+            Iterator<Blob> iterator = blobs.iterator();
+            assertTrue(iterator.hasNext());
+            iterator.next();
+
+            // Delete everything while the listing is in progress, as another cluster member would. The remaining
+            // blobs may or may not be listed, but the listing must not fail.
+            store.deleteDescendants(dirPath);
+            iterator.forEachRemaining(blob -> assertNotNull(blob.getPath()));
+        }
+
+        // Deleting again what is already deleted is not an error.
+        store.deleteDescendants(dirPath);
+        store.deleteBlob(BlobPath.absolute("concurrentDir", "a", "file1.dat"));
+        assertFalse(store.hasDescendants(dirPath));
     }
 
     @Test

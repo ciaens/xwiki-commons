@@ -62,7 +62,8 @@ public interface BlobStore
      *
      * <p>The blobs are fetched lazily while the stream is consumed. A failure at that time is thrown by the stream
      * operation as an {@link UncheckedBlobStoreException} whose cause is the {@link BlobStoreException} describing
-     * it.</p>
+     * it. Blobs that are deleted while the stream is consumed, for example by another cluster member sharing the
+     * store, may or may not be returned, but their deletion is not a failure.</p>
      *
      * @param path the path prefix to search under
      * @return a stream of the blobs under the given path
@@ -131,7 +132,8 @@ public interface BlobStore
         throws BlobStoreException;
 
     /**
-     * Delete the blob at the given path.
+     * Delete the blob at the given path. Deleting a blob that doesn't exist is not an error, so that the same blob can
+     * be deleted concurrently.
      *
      * @param path the path of the blob to delete
      * @throws BlobStoreException if the deletion fails
@@ -139,7 +141,9 @@ public interface BlobStore
     void deleteBlob(BlobPath path) throws BlobStoreException;
 
     /**
-     * Delete all descendant blobs under the given path prefix.
+     * Delete all descendant blobs under the given path prefix. Blobs that don't exist anymore when they would be
+     * deleted, for example because they are deleted concurrently by another thread or another cluster member sharing
+     * the store, are skipped: deleting the same descendants concurrently or several times is not an error.
      *
      * @param path the path prefix to delete under
      * @throws BlobStoreException if the deletion fails, including when listing the blobs to delete fails

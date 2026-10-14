@@ -22,11 +22,17 @@ package org.xwiki.store.blob.internal;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
-import java.io.UncheckedIOException;
+import java.nio.file.DirectoryIteratorException;
+import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
 import org.apache.commons.io.file.PathUtils;
@@ -189,17 +195,17 @@ class FileSystemBlobStoreTest extends XWikiTempDirExtension
     }
 
     @Test
-    void listDescendantsWrapsWalkFailure() throws IOException, BlobStoreException
+    void listDescendantsWrapsReadFailures() throws IOException, BlobStoreException
     {
         Path directory = this.basePath.resolve("dir");
-        Files.createDirectories(directory);
+        Path subdirectory = directory.resolve("subdir");
+        Files.createDirectories(subdirectory);
+        Files.createFile(subdirectory.resolve("file.txt"));
         BlobPath blobPath = BlobPath.absolute("dir");
         IOException failure = new IOException("Simulated I/O error");
 
         try (MockedStatic<Files> filesMock = mockStatic(Files.class, CALLS_REAL_METHODS)) {
-            filesMock.when(() -> Files.walk(any(Path.class))).thenAnswer(invocation -> Stream.<Path>generate(() -> {
-                throw new UncheckedIOException(failure);
-            }));
+            filesMock.when(() -> Files.newDirectoryStream(subdirectory)).thenThrow(failure);
 
             try (Stream<Blob> blobs = this.blobStore.listDescendants(blobPath)) {
                 UncheckedBlobStoreException thrown = assertThrows(UncheckedBlobStoreException.class, blobs::toList);
@@ -212,6 +218,156 @@ class FileSystemBlobStoreTest extends XWikiTempDirExtension
                 assertThrows(BlobStoreException.class, () -> this.blobStore.hasDescendants(blobPath));
             assertEquals("Failed to check if the given prefix has descendants: /dir", thrown.getMessage());
             assertSame(failure, thrown.getCause().getCause());
+
+            filesMock.when(() -> Files.newDirectoryStream(directory)).thenThrow(failure);
+
+            thrown = assertThrows(BlobStoreException.class, () -> this.blobStore.listDescendants(blobPath));
+            assertSame(failure, thrown.getCause());
+        }
+    }
+
+    @Test
+    void listDescendantsSkipsBlobsDeletedDuringTheListing() throws IOException, BlobStoreException
+    {
+        // Two directories with a file each, and a nested directory in each of them.
+        for (String name : List.of("a", "b")) {
+            Path directory = this.basePath.resolve("dir").resolve(name);
+            Files.createDirectories(directory.resolve("nested"));
+            Files.createFile(directory.resolve("file.txt"));
+            Files.createFile(directory.resolve("other.txt"));
+            Files.createFile(directory.resolve("nested").resolve("file.txt"));
+        }
+
+        try (Stream<Blob> blobs = this.blobStore.listDescendants(BlobPath.absolute("dir"))) {
+            Iterator<Blob> iterator = blobs.iterator();
+            Blob first = iterator.next();
+
+            // Delete everything else, as another cluster member sharing the directory would: the file next to the
+            // first one, the nested directory next to it and the other directory, which hasn't been read yet.
+            String firstDirectory = first.getPath().getNames().get(1);
+            Path directory = this.basePath.resolve("dir").resolve(firstDirectory);
+            for (String name : List.of("file.txt", "other.txt", "nested")) {
+                PathUtils.delete(directory.resolve(name));
+            }
+            PathUtils.deleteDirectory(this.basePath.resolve("dir").resolve("a".equals(firstDirectory) ? "b" : "a"));
+
+            List<Blob> remaining = new ArrayList<>();
+            iterator.forEachRemaining(remaining::add);
+            assertEquals(List.of(), remaining);
+        }
+    }
+
+    @Test
+    void listDescendantsSkipsDirectoryDeletedWhileBeingRead() throws IOException, BlobStoreException
+    {
+        Path directory = this.basePath.resolve("dir");
+        Files.createDirectories(directory);
+        Files.createFile(directory.resolve("file.txt"));
+
+        try (MockedStatic<Files> filesMock = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            filesMock.when(() -> Files.newDirectoryStream(directory))
+                .thenReturn(failingDirectoryStream(new NoSuchFileException(directory.toString())));
+
+            try (Stream<Blob> blobs = this.blobStore.listDescendants(BlobPath.absolute("dir"))) {
+                assertEquals(List.of(), blobs.toList());
+            }
+
+            IOException failure = new IOException("Simulated I/O error");
+            filesMock.when(() -> Files.newDirectoryStream(directory)).thenReturn(failingDirectoryStream(failure));
+
+            try (Stream<Blob> blobs = this.blobStore.listDescendants(BlobPath.absolute("dir"))) {
+                UncheckedBlobStoreException thrown = assertThrows(UncheckedBlobStoreException.class, blobs::toList);
+                assertSame(failure, thrown.getCause().getCause());
+            }
+        }
+    }
+
+    private static DirectoryStream<Path> failingDirectoryStream(IOException failure)
+    {
+        return new DirectoryStream<>()
+        {
+            @Override
+            public Iterator<Path> iterator()
+            {
+                return Stream.<Path>generate(() -> {
+                    throw new DirectoryIteratorException(failure);
+                }).iterator();
+            }
+
+            @Override
+            public void close()
+            {
+                // Nothing to close.
+            }
+        };
+    }
+
+    @Test
+    void listDescendantsOfAFile() throws IOException, BlobStoreException
+    {
+        Files.createFile(this.basePath.resolve("file.txt"));
+
+        try (Stream<Blob> blobs = this.blobStore.listDescendants(BlobPath.absolute("file.txt"))) {
+            assertEquals(List.of(), blobs.toList());
+        }
+    }
+
+    @Test
+    void listDescendantsWithLinks() throws IOException, BlobStoreException
+    {
+        Path directory = this.basePath.resolve("dir");
+        Path target = Files.createDirectories(this.basePath.resolve("target"));
+        Files.createFile(target.resolve("file.txt"));
+        Files.createDirectories(directory);
+        Files.createSymbolicLink(directory.resolve("fileLink"), target.resolve("file.txt"));
+        Files.createSymbolicLink(directory.resolve("directoryLink"), target);
+        Files.createSymbolicLink(directory.resolve("brokenLink"), target.resolve("missing.txt"));
+        Files.createSymbolicLink(directory.resolve("loopLink"), directory.resolve("loopLink"));
+
+        try (Stream<Blob> blobs = this.blobStore.listDescendants(BlobPath.absolute("dir"))) {
+            assertEquals(List.of(BlobPath.absolute("dir", "fileLink")), blobs.map(Blob::getPath).toList());
+        }
+    }
+
+    @Test
+    void storeInALinkedDirectory() throws IOException, BlobStoreException
+    {
+        // The base directory of the store is a link, for example to a mounted volume.
+        Path target = Files.createDirectories(this.basePath.resolve("volume"));
+        Files.createDirectories(target.resolve("dir"));
+        Files.createFile(target.resolve("dir").resolve("file.txt"));
+        Path outside = Files.createFile(this.basePath.resolve("outside.txt"));
+        Files.createSymbolicLink(target.resolve("outsideLink"), outside);
+        Path link = Files.createSymbolicLink(this.basePath.resolve("store"), target);
+        FileSystemBlobStoreProperties linkedProperties = new FileSystemBlobStoreProperties();
+        linkedProperties.setRootDirectory(link);
+        FileSystemBlobStore linkedStore = new FileSystemBlobStore("linked", linkedProperties);
+
+        try (Stream<Blob> blobs = linkedStore.listDescendants(BlobPath.root())) {
+            assertEquals(List.of(BlobPath.absolute("dir", "file.txt"), BlobPath.absolute("outsideLink")),
+                blobs.map(Blob::getPath).sorted(Comparator.comparing(BlobPath::toString)).toList());
+        }
+
+        linkedStore.deleteDescendants(BlobPath.root());
+
+        // The content is deleted, the link and its target directory are kept, and links are not followed.
+        assertTrue(Files.isSymbolicLink(link));
+        assertTrue(Files.isDirectory(target));
+        assertTrue(PathUtils.isEmptyDirectory(target));
+        assertTrue(Files.exists(outside));
+        assertFalse(linkedStore.hasDescendants(BlobPath.root()));
+    }
+
+    @Test
+    void listDescendantsIteratorWithoutNext() throws IOException, BlobStoreException
+    {
+        Files.createDirectories(this.basePath.resolve("dir"));
+
+        try (FileSystemBlobIterator iterator =
+            FileSystemBlobIterator.walk(this.blobStore, this.basePath.resolve("dir"), BlobPath.absolute("dir")))
+        {
+            assertFalse(iterator.hasNext());
+            assertThrows(NoSuchElementException.class, iterator::next);
         }
     }
 
@@ -703,6 +859,53 @@ class FileSystemBlobStoreTest extends XWikiTempDirExtension
 
         // Should not throw exception
         assertDoesNotThrow(() -> this.blobStore.deleteDescendants(blobPath));
+    }
+
+    @Test
+    void deleteDescendantsWhileDeletedConcurrently() throws IOException, BlobStoreException
+    {
+        Path directory = this.basePath.resolve("dir");
+        for (String name : List.of("a", "b")) {
+            Files.createDirectories(directory.resolve(name).resolve("nested"));
+            Files.createFile(directory.resolve(name).resolve("file.txt"));
+            Files.createFile(directory.resolve(name).resolve("other.txt"));
+            Files.createFile(directory.resolve(name).resolve("nested").resolve("file.txt"));
+        }
+        AtomicBoolean deletedConcurrently = new AtomicBoolean();
+
+        try (MockedStatic<Files> filesMock = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            // When the first file is deleted, another cluster member sharing the directory deletes everything.
+            filesMock.when(() -> Files.deleteIfExists(any(Path.class))).thenAnswer(invocation -> {
+                if (deletedConcurrently.compareAndSet(false, true)) {
+                    PathUtils.deleteDirectory(directory);
+                }
+                return invocation.callRealMethod();
+            });
+
+            this.blobStore.deleteDescendants(BlobPath.absolute("dir"));
+        }
+
+        assertTrue(deletedConcurrently.get());
+        assertFalse(Files.exists(directory));
+    }
+
+    @Test
+    void deleteDescendantsFailure() throws IOException
+    {
+        Path directory = this.basePath.resolve("dir");
+        Files.createDirectories(directory.resolve("nested"));
+        Files.createFile(directory.resolve("file.txt"));
+        IOException failure = new IOException("Simulated I/O error");
+
+        try (MockedStatic<Files> filesMock = mockStatic(Files.class, CALLS_REAL_METHODS)) {
+            filesMock.when(() -> Files.deleteIfExists(directory.resolve("file.txt"))).thenThrow(failure);
+            filesMock.when(() -> Files.newDirectoryStream(directory.resolve("nested"))).thenThrow(failure);
+
+            BlobPath blobPath = BlobPath.absolute("dir");
+            BlobStoreException thrown =
+                assertThrows(BlobStoreException.class, () -> this.blobStore.deleteDescendants(blobPath));
+            assertSame(failure, thrown.getCause());
+        }
     }
 
     @Test

@@ -47,7 +47,8 @@ import org.xwiki.store.blob.BlobStoreException;
 import org.xwiki.store.blob.UncheckedBlobStoreException;
 
 /**
- * Lazily walks a directory of a {@link FileSystemBlobStore}, depth first, and returns its regular files as blobs.
+ * Lazily walks a directory of a {@link FileSystemBlobStore}, depth first, and returns its regular files as blobs. The
+ * blobs keep the size and date of the file read during the walk.
  *
  * <p>Files and directories can be deleted during the walk, by another thread or by another cluster member sharing the
  * directory: the entries that disappear are skipped, as is the walked directory itself when it doesn't exist. Any
@@ -188,11 +189,12 @@ final class FileSystemBlobIterator implements Iterator<Blob>, Closeable
         if (attributes != null && attributes.isSymbolicLink()) {
             // A link to a regular file is a blob. Links to directories are not followed.
             BasicFileAttributes targetAttributes = readLinkTargetAttributes(entry);
-            return targetAttributes != null && targetAttributes.isRegularFile() ? toBlob(entry) : null;
+            return targetAttributes != null && targetAttributes.isRegularFile() ? toBlob(entry, targetAttributes)
+                : null;
         } else if (attributes != null && attributes.isDirectory()) {
             openDirectory(entry);
         } else if (attributes != null && attributes.isRegularFile()) {
-            return toBlob(entry);
+            return toBlob(entry, attributes);
         }
 
         // The entry was deleted since the directory was read, or it's neither a file nor a directory.
@@ -233,14 +235,14 @@ final class FileSystemBlobIterator implements Iterator<Blob>, Closeable
         }
     }
 
-    private Blob toBlob(Path file)
+    private Blob toBlob(Path file, BasicFileAttributes attributes)
     {
         List<String> segments = new ArrayList<>(this.directoryPath.getNames());
         for (Path segment : this.directory.relativize(file)) {
             segments.add(segment.toString());
         }
 
-        return new FileSystemBlob(BlobPath.absolute(segments), file, this.store);
+        return new FileSystemBlob(BlobPath.absolute(segments), file, this.store, attributes);
     }
 
     private UncheckedBlobStoreException failure(IOException cause)

@@ -65,6 +65,11 @@ public interface BlobStore
      * it. Blobs that are deleted while the stream is consumed, for example by another cluster member sharing the
      * store, may or may not be returned, but their deletion is not a failure.</p>
      *
+     * <p>The {@link Blob#getSize() size} and {@link Blob#getLastModified() last modification date} of the returned
+     * blobs can be the ones seen during the listing, so that reading them doesn't need a request per blob. They are
+     * read again from the store once the blob is written through the returned object; use
+     * {@link #getBlob(BlobPath)} to get the current values.</p>
+     *
      * @param path the path prefix to search under
      * @return a stream of the blobs under the given path
      * @throws BlobStoreException if the listing operation fails before the stream is returned

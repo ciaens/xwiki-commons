@@ -19,6 +19,7 @@
  */
 package org.xwiki.store.blob.internal;
 
+import java.time.temporal.ChronoUnit;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 
@@ -159,6 +160,12 @@ final class S3BlobIterator implements Iterator<Blob>
 
         BlobPath blobPath = this.store.getKeyMapper().s3KeyToBlobPath(key);
         if (blobPath != null) {
+            if (s3Object.size() != null && s3Object.lastModified() != null) {
+                // Keep the size and date of the listing to avoid a HeadObject request per blob. Some services return
+                // the date with milliseconds in listings: truncate it to the precision of HeadObject.
+                return new S3Blob(blobPath, this.bucketName, key, this.store, this.s3Client, s3Object.size(),
+                    s3Object.lastModified().truncatedTo(ChronoUnit.SECONDS));
+            }
             return new S3Blob(blobPath, this.bucketName, key, this.store, this.s3Client);
         }
 

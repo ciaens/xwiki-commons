@@ -30,6 +30,7 @@ import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Instant;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -65,6 +66,16 @@ public class FileSystemBlob extends AbstractBlob<FileSystemBlobStore>
     private final Path absolutePath;
 
     /**
+     * The size and date of the file seen by the listing that returned this blob, used instead of reading the
+     * attributes of the file until the blob is written through this object.
+     */
+    private volatile ListedAttributes listedAttributes;
+
+    private record ListedAttributes(long size, Instant lastModified)
+    {
+    }
+
+    /**
      * Creates a new FileSystemBlob.
      *
      * @param blobPath the path of the blob inside the store
@@ -77,6 +88,23 @@ public class FileSystemBlob extends AbstractBlob<FileSystemBlobStore>
         this.absolutePath = absolutePath;
     }
 
+    /**
+     * Creates a new FileSystemBlob for a file returned by a listing, which keeps the size and date read by the
+     * listing.
+     *
+     * @param blobPath the path of the blob inside the store
+     * @param absolutePath the absolute file system path to the blob
+     * @param store the blob store where this blob is stored
+     * @param attributes the attributes of the file read by the listing
+     * @since 18.10.0RC1
+     */
+    public FileSystemBlob(BlobPath blobPath, Path absolutePath, FileSystemBlobStore store,
+        BasicFileAttributes attributes)
+    {
+        this(blobPath, absolutePath, store);
+        this.listedAttributes = new ListedAttributes(attributes.size(), attributes.lastModifiedTime().toInstant());
+    }
+
     @Override
     public boolean exists()
     {
@@ -86,6 +114,11 @@ public class FileSystemBlob extends AbstractBlob<FileSystemBlobStore>
     @Override
     public long getSize() throws BlobStoreException
     {
+        ListedAttributes attributes = this.listedAttributes;
+        if (attributes != null) {
+            return attributes.size();
+        }
+
         try {
             return Files.exists(this.absolutePath, LinkOption.NOFOLLOW_LINKS)
                 ? Files.size(this.absolutePath)
@@ -106,6 +139,11 @@ public class FileSystemBlob extends AbstractBlob<FileSystemBlobStore>
     @Override
     public Instant getLastModified() throws BlobStoreException
     {
+        ListedAttributes attributes = this.listedAttributes;
+        if (attributes != null) {
+            return attributes.lastModified();
+        }
+
         try {
             return Files.getLastModifiedTime(this.absolutePath).toInstant();
         } catch (NoSuchFileException e) {
@@ -118,6 +156,8 @@ public class FileSystemBlob extends AbstractBlob<FileSystemBlobStore>
     @Override
     public OutputStream getOutputStream(BlobOption... options) throws BlobStoreException
     {
+        // The attributes seen by the listing don't describe the blob anymore once it's written.
+        this.listedAttributes = null;
         BlobOptionSupport.validateSupportedOptions(SUPPORTED_OUTPUT_OPTIONS, options);
         BlobWriteMode writeMode = BlobOptionSupport.findSingleOption(BlobWriteMode.class, options);
 

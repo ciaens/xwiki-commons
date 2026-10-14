@@ -61,6 +61,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -188,6 +190,32 @@ class S3BlobTest
 
         assertEquals("Failed to get the last modification date of the blob [/my/blob.txt]", thrown.getMessage());
         assertSame(exception, thrown.getCause());
+    }
+
+    @Test
+    void listedBlobUsesTheListedAttributesUntilWritten() throws Exception
+    {
+        Instant listedDate = Instant.parse("2026-10-14T10:15:30Z");
+        S3Blob listedBlob = new S3Blob(BLOB_PATH, BUCKET, KEY, this.store, this.s3Client, 42L, listedDate);
+
+        assertEquals(42L, listedBlob.getSize());
+        assertEquals(listedDate, listedBlob.getLastModified());
+        verify(this.s3Client, never()).headObject(any(HeadObjectRequest.class));
+
+        S3BlobStoreProperties properties = new S3BlobStoreProperties();
+        properties.setMultipartUploadPartSize(5 * 1024 * 1024);
+        when(this.store.getProperties()).thenReturn(properties);
+        Instant writtenDate = Instant.parse("2026-10-14T11:00:00Z");
+        when(this.s3Client.headObject(any(HeadObjectRequest.class)))
+            .thenReturn(HeadObjectResponse.builder().contentLength(3L).lastModified(writtenDate).build());
+
+        try (MockedConstruction<S3BlobOutputStream> ignored = mockConstruction(S3BlobOutputStream.class)) {
+            listedBlob.getOutputStream();
+        }
+
+        assertEquals(3L, listedBlob.getSize());
+        assertEquals(writtenDate, listedBlob.getLastModified());
+        verify(this.s3Client, times(2)).headObject(any(HeadObjectRequest.class));
     }
 
     @Test

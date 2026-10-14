@@ -19,6 +19,7 @@
  */
 package org.xwiki.store.blob;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -184,6 +185,29 @@ abstract class AbstractBlobStoreIT
         // List all under root
         try (Stream<Blob> blobs = store.listDescendants(BlobPath.absolute(List.of()))) {
             assertEquals(4, blobs.count());
+        }
+    }
+
+    @Test
+    void listDescendantsWithSizeAndDate() throws Exception
+    {
+        BlobStore store = getOrCreateBlobStore("testListWithAttributes");
+        BlobStoreTestUtils.writeBlob(store, BlobPath.absolute("attributes", "small.dat"),
+            BlobStoreTestUtils.createTestData(10));
+        BlobStoreTestUtils.writeBlob(store, BlobPath.absolute("attributes", "sub", "large.dat"),
+            BlobStoreTestUtils.createTestData(2048));
+
+        try (Stream<Blob> blobs = store.listDescendants(BlobPath.absolute("attributes"))) {
+            for (Blob blob : blobs.toList()) {
+                Blob current = store.getBlob(blob.getPath());
+                assertEquals(current.getSize(), blob.getSize());
+                assertEquals(current.getLastModified(), blob.getLastModified());
+
+                // Once written through the listed blob, the attributes are the new ones.
+                blob.writeFromStream(new ByteArrayInputStream(BlobStoreTestUtils.createTestData(5)));
+                assertEquals(5, blob.getSize());
+                assertEquals(store.getBlob(blob.getPath()).getLastModified(), blob.getLastModified());
+            }
         }
     }
 

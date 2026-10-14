@@ -27,6 +27,8 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Iterator;
@@ -191,6 +193,25 @@ class FileSystemBlobStoreTest extends XWikiTempDirExtension
                 .sorted()
                 .toList();
             assertEquals(List.of("/testdir/file1.txt", "/testdir/file2.txt", "/testdir/subdir/file3.txt"), filenames);
+        }
+    }
+
+    @Test
+    void listDescendantsKeepsTheAttributesReadDuringTheListing() throws IOException, BlobStoreException
+    {
+        Path file = Files.createDirectories(this.basePath.resolve("dir")).resolve("file.txt");
+        Files.write(file, new byte[16]);
+        Instant listedDate = Instant.parse("2026-10-14T10:15:30Z");
+        Files.setLastModifiedTime(file, FileTime.from(listedDate));
+
+        try (Stream<Blob> blobs = this.blobStore.listDescendants(BlobPath.absolute("dir"))) {
+            Blob blob = blobs.findFirst().orElseThrow();
+            // Deleted after the listing: the blob keeps the attributes read during the listing.
+            Files.delete(file);
+
+            assertEquals(16L, blob.getSize());
+            assertEquals(listedDate, blob.getLastModified());
+            assertEquals(-1L, this.blobStore.getBlob(BlobPath.absolute("dir", "file.txt")).getSize());
         }
     }
 

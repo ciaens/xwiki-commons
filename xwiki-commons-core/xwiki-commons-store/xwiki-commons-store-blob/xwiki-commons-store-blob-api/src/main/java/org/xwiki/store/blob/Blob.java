@@ -52,7 +52,8 @@ public interface Blob extends StreamProvider
     boolean exists() throws BlobStoreException;
 
     /**
-     * Get the size of this blob.
+     * Get the size of this blob. For a blob returned by {@link BlobStore#listDescendants(BlobPath)}, this can be the
+     * size seen during the listing.
      *
      * @return the size of this blob in bytes, or -1 if the blob doesn't exist
      * @throws BlobStoreException when the size cannot be determined
@@ -63,7 +64,8 @@ public interface Blob extends StreamProvider
      * Get the date of the last write of this blob, as recorded by the store rather than by the code that wrote it. Its
      * precision depends on the store, so it is not meant to order two writes made close to each other. Since it comes
      * from the store, the age of a blob computed from it doesn't depend on a difference between the clocks of the
-     * cluster member that wrote the blob and the one that reads it.
+     * cluster member that wrote the blob and the one that reads it. For a blob returned by
+     * {@link BlobStore#listDescendants(BlobPath)}, this can be the date seen during the listing.
      *
      * @return the date of the last write of this blob, or {@code null} if the blob doesn't exist
      * @throws BlobStoreException when the date cannot be determined, or when the store doesn't provide it

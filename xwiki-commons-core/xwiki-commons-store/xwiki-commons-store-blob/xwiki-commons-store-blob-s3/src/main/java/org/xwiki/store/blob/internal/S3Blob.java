@@ -64,6 +64,16 @@ public class S3Blob extends AbstractBlob<S3BlobStore>
     private final S3Client s3Client;
 
     /**
+     * The size and date of the object seen by the listing that returned this blob, used instead of a HeadObject
+     * request until the blob is written through this object.
+     */
+    private volatile ListedAttributes listedAttributes;
+
+    private record ListedAttributes(long size, Instant lastModified)
+    {
+    }
+
+    /**
      * Constructor.
      *
      * @param path the blob path
@@ -78,6 +88,25 @@ public class S3Blob extends AbstractBlob<S3BlobStore>
         this.bucketName = bucketName;
         this.s3Key = s3Key;
         this.s3Client = s3Client;
+    }
+
+    /**
+     * Constructor for a blob returned by a listing, which keeps the size and date returned by the listing.
+     *
+     * @param path the blob path
+     * @param bucketName the S3 bucket name
+     * @param s3Key the S3 key for this blob
+     * @param store the parent store
+     * @param s3Client the S3 client
+     * @param size the size of the object returned by the listing
+     * @param lastModified the last modification date of the object returned by the listing
+     * @since 18.10.0RC1
+     */
+    public S3Blob(BlobPath path, String bucketName, String s3Key, S3BlobStore store, S3Client s3Client, long size,
+        Instant lastModified)
+    {
+        this(path, bucketName, s3Key, store, s3Client);
+        this.listedAttributes = new ListedAttributes(size, lastModified);
     }
 
     @Override
@@ -106,6 +135,11 @@ public class S3Blob extends AbstractBlob<S3BlobStore>
     @Override
     public long getSize() throws BlobStoreException
     {
+        ListedAttributes attributes = this.listedAttributes;
+        if (attributes != null) {
+            return attributes.size();
+        }
+
         try {
             return getHeadObject().contentLength();
         } catch (NoSuchKeyException e) {
@@ -126,6 +160,11 @@ public class S3Blob extends AbstractBlob<S3BlobStore>
     @Override
     public Instant getLastModified() throws BlobStoreException
     {
+        ListedAttributes attributes = this.listedAttributes;
+        if (attributes != null) {
+            return attributes.lastModified();
+        }
+
         try {
             return getHeadObject().lastModified();
         } catch (NoSuchKeyException e) {
@@ -139,6 +178,8 @@ public class S3Blob extends AbstractBlob<S3BlobStore>
     @Override
     public OutputStream getOutputStream(BlobOption... options) throws BlobStoreException
     {
+        // The attributes seen by the listing don't describe the blob anymore once it's written.
+        this.listedAttributes = null;
         BlobOptionSupport.validateSupportedOptions(SUPPORTED_OUTPUT_OPTIONS, options);
 
         long partSizeBytes = this.getStore().getProperties().getMultipartUploadPartSize();

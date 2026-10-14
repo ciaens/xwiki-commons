@@ -19,6 +19,7 @@
  */
 package org.xwiki.store.blob.internal;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.NoSuchElementException;
@@ -36,6 +37,8 @@ import org.xwiki.store.blob.UncheckedBlobStoreException;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.exception.SdkClientException;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.S3Exception;
@@ -50,6 +53,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -374,6 +378,35 @@ class S3BlobIteratorTest
 
         // Verify both pages were fetched
         verify(this.s3Client, times(2)).listObjectsV2(any(ListObjectsV2Request.class));
+    }
+
+    @Test
+    void listedBlobsKeepTheSizeAndDateOfTheListing() throws Exception
+    {
+        S3Object obj1 = S3Object.builder().key("test/prefix/file1.txt").size(42L)
+            .lastModified(Instant.parse("2026-10-14T10:15:30.123Z")).build();
+        // Without the size or date in the listing, the blob reads them with a HeadObject request.
+        S3Object obj2 = createS3Object("test/prefix/file2.txt");
+        ListObjectsV2Response response = ListObjectsV2Response.builder()
+            .contents(obj1, obj2)
+            .isTruncated(false)
+            .build();
+        when(this.s3Client.listObjectsV2(any(ListObjectsV2Request.class))).thenReturn(response);
+        when(this.keyMapper.s3KeyToBlobPath("test/prefix/file1.txt")).thenReturn(mock());
+        when(this.keyMapper.s3KeyToBlobPath("test/prefix/file2.txt")).thenReturn(mock());
+        when(this.s3Client.headObject(any(HeadObjectRequest.class)))
+            .thenReturn(HeadObjectResponse.builder().contentLength(7L).lastModified(Instant.EPOCH).build());
+
+        Blob blob1 = this.iterator.next();
+        assertEquals(42L, blob1.getSize());
+        // Truncated to the precision of the date returned by HeadObject.
+        assertEquals(Instant.parse("2026-10-14T10:15:30Z"), blob1.getLastModified());
+        verify(this.s3Client, never()).headObject(any(HeadObjectRequest.class));
+
+        Blob blob2 = this.iterator.next();
+        assertEquals(7L, blob2.getSize());
+        assertEquals(Instant.EPOCH, blob2.getLastModified());
+        verify(this.s3Client, times(2)).headObject(any(HeadObjectRequest.class));
     }
 
     private S3Object createS3Object(String key)

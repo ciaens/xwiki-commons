@@ -29,6 +29,7 @@ import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 
@@ -166,6 +167,28 @@ class FileSystemBlobTest
             assertEquals("Error getting the last modification date of the file.", exception.getMessage());
             assertInstanceOf(IOException.class, exception.getCause());
         }
+    }
+
+    @Test
+    void listedBlobUsesTheListedAttributesUntilWritten() throws Exception
+    {
+        Files.write(this.absolutePath, new byte[16]);
+        Instant listedDate = Instant.parse("2026-10-14T10:15:30Z");
+        Files.setLastModifiedTime(this.absolutePath, FileTime.from(listedDate));
+        FileSystemBlob listedBlob = new FileSystemBlob(this.blobPath, this.absolutePath, this.store,
+            Files.readAttributes(this.absolutePath, BasicFileAttributes.class));
+
+        // Changed by someone else after the listing.
+        Files.write(this.absolutePath, new byte[8]);
+        assertEquals(16L, listedBlob.getSize());
+        assertEquals(listedDate, listedBlob.getLastModified());
+
+        try (OutputStream outputStream = listedBlob.getOutputStream()) {
+            outputStream.write(new byte[4]);
+        }
+
+        assertEquals(4L, listedBlob.getSize());
+        assertEquals(Files.getLastModifiedTime(this.absolutePath).toInstant(), listedBlob.getLastModified());
     }
 
     @Test
